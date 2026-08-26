@@ -101,6 +101,7 @@ function draw(tex, xf, alpha) {
 
 function frame(now) {
   requestAnimationFrame(frame);
+  if (anim) stepAnim(now);
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clearColor(0, 0, 0, 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
@@ -234,16 +235,63 @@ function setIter(n) {
   scheduleRender();
 }
 
-function resetAll() {
-  if (!defaultView) return;
-  Object.assign(state, defaultView);
-  setPrecision(state.precision);
+let anim = null;
+
+const EASE = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+function animateTo(target, dur = 1400) {
+  const from = { centerRe: state.centerRe, centerIm: state.centerIm, scale: state.scale };
+  const to = {
+    centerRe: target.centerRe ?? state.centerRe,
+    centerIm: target.centerIm ?? state.centerIm,
+    scale: target.scale ?? state.scale
+  };
+  state.mode = target.mode ?? state.mode;
+  state.juliaRe = target.juliaRe ?? state.juliaRe;
+  state.juliaIm = target.juliaIm ?? state.juliaIm;
+  state.maxIter = target.maxIter ?? state.maxIter;
+  state.palette = target.palette ?? state.palette;
+  state.ssaa = target.ssaa ?? state.ssaa;
+  setPrecision(target.precision ?? state.precision);
   updateModeUI();
   updatePaletteUI();
   updateIterUI();
+  updateSsaaUI();
+  anim = { from, to, t0: performance.now(), dur, lastRender: 0 };
+}
+
+function stepAnim(now) {
+  const t = Math.min(1, (now - anim.t0) / anim.dur);
+  const e = EASE(t);
+  const logFrom = Math.log(anim.from.scale);
+  const logTo = Math.log(anim.to.scale);
+  state.scale = Math.exp(logFrom + (logTo - logFrom) * e);
+  state.centerRe = anim.from.centerRe + (anim.to.centerRe - anim.from.centerRe) * e;
+  state.centerIm = anim.from.centerIm + (anim.to.centerIm - anim.from.centerIm) * e;
   displayTransform = { sx: 1, sy: 1, tx: 0, ty: 0 };
   updateHud();
-  requestRender();
+  if (now - anim.lastRender > 40) {
+    anim.lastRender = now;
+    requestRender();
+  }
+  if (t >= 1) {
+    const exact = { ...anim.to };
+    anim = null;
+    state.scale = exact.scale;
+    state.centerRe = exact.centerRe;
+    state.centerIm = exact.centerIm;
+    updateHud();
+    requestRender();
+  }
+}
+
+function cancelAnim() {
+  anim = null;
+}
+
+function resetAll() {
+  if (!defaultView) return;
+  animateTo(defaultView);
 }
 
 function localPoint(e) {
@@ -260,6 +308,7 @@ function complexAt(px, py) {
 }
 
 function panBy(dx, dy) {
+  cancelAnim();
   displayTransform.tx += dx / canvas.clientWidth;
   displayTransform.ty += dy / canvas.clientHeight;
   const p = state.scale / canvas.clientWidth;
@@ -268,6 +317,7 @@ function panBy(dx, dy) {
 }
 
 function zoomAround(factor, cx, cy, fx, fy) {
+  cancelAnim();
   const c = complexAt(fx, fy);
   const old = state.scale;
   state.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, old / factor));
@@ -357,6 +407,7 @@ canvas.addEventListener('pointercancel', e => endPointer(e, false));
 
 function handleClick(cx, cy) {
   if (state.mode !== 0) return;
+  cancelAnim();
   const r = canvas.getBoundingClientRect();
   const c = complexAt(cx - r.left, cy - r.top);
   state.juliaRe = c.re;
@@ -393,14 +444,8 @@ paletteDots.forEach(b => b.addEventListener('click', () => {
 
 presetSelect.addEventListener('change', () => {
   const p = JSON.parse(presetSelect.value);
-  Object.assign(state, p);
-  setPrecision(state.precision);
-  displayTransform = { sx: 1, sy: 1, tx: 0, ty: 0 };
-  updateModeUI();
-  updatePaletteUI();
-  updateIterUI();
-  updateHud();
-  requestRender();
+  cancelAnim();
+  animateTo(p);
 });
 
 iterSlider.addEventListener('input', () => {
