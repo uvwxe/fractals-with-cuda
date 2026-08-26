@@ -33,9 +33,12 @@ __device__ inline REAL escape_time(
     if (n >= max_iter) return (REAL)-1.0;
     REAL logz = 0.5 * RLOG(zr * zr + zi * zi);
     REAL smooth = (REAL)n - RLOG2(logz / RLOG(2.0));
-    REAL t = smooth / (REAL)max_iter;
+    // Normalize by a fixed iteration period (not max_iter) so every
+    // palette cycle spans ~20 iterations. max_iter compression washes the
+    // exterior into its first stop; a fixed period keeps vivid repeating
+    // bands that scale naturally with zoom depth.
+    REAL t = smooth / 60.0;
     if (t < 0.0) t = 0.0;
-    if (t > 1.0) t = 1.0;
     return t;
 }
 
@@ -220,7 +223,7 @@ FULL_SET = {"centerRe": -0.6, "centerIm": 0.0, "scale": 3.4, "maxIter": 400}
 DEEP_ZOOM_PRESETS = [
     {"name": "Seahorse Valley", "centerRe": -0.745, "centerIm": 0.113, "scale": 0.05, "maxIter": 600},
     {"name": "Seahorse Deep", "centerRe": -0.743643887037151, "centerIm": 0.13182590420533, "scale": 0.0002, "maxIter": 1200, "precision": 1},
-    {"name": "Elephant Valley", "centerRe": 0.2825, "centerIm": 0.01, "scale": 0.06, "maxIter": 600},
+    {"name": "Elephant Valley", "centerRe": 0.2825, "centerIm": 0.005, "scale": 0.045, "maxIter": 600},
     {"name": "Triple Spiral", "centerRe": -0.088, "centerIm": 0.654, "scale": 0.04, "maxIter": 800},
     {"name": "Satellite Minibrot", "centerRe": -1.755, "centerIm": 0.0, "scale": 0.06, "maxIter": 3000},
     {"name": "Satellite Edge", "centerRe": -1.755, "centerIm": 0.012, "scale": 0.002, "maxIter": 4000},
