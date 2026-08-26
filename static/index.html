@@ -3,12 +3,65 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>fractals-with-cuda</title>
-  <style>
-    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #fbfbfd; color: #1d1d1f; font-family: -apple-system, "Segoe UI", sans-serif; }
-  </style>
+  <meta name="description" content="Real-time Mandelbrot and Julia fractal explorer rendered on the GPU with raw CUDA kernels.">
+  <title>fractals — CUDA</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <p>frontend coming in the next part</p>
+  <canvas id="view"></canvas>
+
+  <header id="topbar" class="glass">
+    <h1 id="title">fractals</h1>
+    <span class="dot" aria-hidden="true"></span>
+    <span id="gpu-badge" class="mono">GPU…</span>
+  </header>
+
+  <div id="hud" class="glass mono">
+    <div id="hud-mag">×1.0</div>
+    <div id="hud-coords">-0.60 + 0.00i</div>
+    <div id="hud-render">render 3.2 ms</div>
+  </div>
+
+  <div id="controls" class="glass">
+    <div id="mode-seg" class="seg" role="group" aria-label="Fractal mode">
+      <button type="button" class="active" data-mode="0" aria-label="Mandelbrot mode" aria-pressed="true">Mandelbrot</button>
+      <button type="button" data-mode="1" aria-label="Julia mode" aria-pressed="false">Julia</button>
+    </div>
+
+    <div id="palette-row" role="group" aria-label="Color palette">
+      <button type="button" class="palette-dot active" data-palette="0" title="Thermal" aria-label="Palette: Thermal"></button>
+      <button type="button" class="palette-dot" data-palette="1" title="Mono" aria-label="Palette: Mono"></button>
+      <button type="button" class="palette-dot" data-palette="2" title="Classic" aria-label="Palette: Classic"></button>
+      <button type="button" class="palette-dot" data-palette="3" title="Sunset" aria-label="Palette: Sunset"></button>
+    </div>
+
+    <select id="preset-select" aria-label="Zoom presets">
+      <optgroup label="Deep Zoom">
+        <option value="" disabled>Deep zoom presets…</option>
+      </optgroup>
+      <optgroup label="Julia">
+        <option value="" disabled>Julia presets…</option>
+      </optgroup>
+    </select>
+
+    <label id="iter-wrap" aria-label="Detail level">
+      <span class="iter-label">detail</span>
+      <input type="range" id="iter-slider" min="100" max="20000" step="100" value="400">
+      <span id="iter-value" class="mono">400</span>
+    </label>
+
+    <button type="button" id="ssaa-btn" class="toggle-btn" title="Toggle 2×2 supersampling" aria-label="Toggle 2x2 supersampling" aria-pressed="false">2×</button>
+    <button type="button" id="precision-btn" class="toggle-btn" title="Toggle double precision rendering" aria-label="Toggle double precision" aria-pressed="false">fp64</button>
+    <button type="button" id="reset-btn" class="primary-btn" aria-label="Reset view">Reset</button>
+  </div>
+
+  <div id="hint" class="mono">scroll to zoom · drag to pan · click for julia</div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/app.js" defer></script>
 </body>
 </html>
