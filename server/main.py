@@ -5,10 +5,13 @@ Run: .venv\\Scripts\\python.exe -m uvicorn server.main:app --port 8000
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+import asyncio
+import json
+import struct
 import time
 
 import cupy as cp
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -17,6 +20,11 @@ from . import fractals, palettes
 
 MAX_ITER_FP32 = 20000
 MAX_ITER_FP64 = 6000  # keep fp64 kernels well under the Windows TDR timeout
+
+# Preview cap: buffers wider than ~320px hit the ~50ms Windows WDDM slow-sync
+# path; at <=320px a render+transfer is ~10ms. Keep previews small: they're
+# upscaled with GL_LINEAR and replaced by a full-res pass on settle.
+PREVIEW_MAX_W = 192
 
 
 class RenderView(BaseModel):
@@ -96,6 +104,93 @@ def presets():
             "scale": fractals.FULL_SET["scale"],
         },
     }
+
+
+@app.websocket("/ws")
+async def ws_render(ws: WebSocket):
+    """Stream rendered frames back-to-back.
+
+    Client sends JSON view updates (text). Server continuously renders the
+    latest view and pushes frames as binary: 4-byte LE width + 4-byte LE height
+    + RGB bytes. Rendering back-to-back pipelines the GPU so zoom is smooth
+    instead of a request/response slideshow.
+    """
+
+    def _render_now(view: dict) -> bytes:
+        pending = fractals.render_async(view)
+        return pending.bytes()
+
+    await ws.accept()
+    view: dict | None = None
+    seq = 0
+    settle = False
+    view_lock = asyncio.Lock()
+    closed = False
+
+    async def receiver():
+        nonlocal view, seq, settle
+        while True:
+            try:
+                msg = await ws.receive_text()
+            except WebSocketDisconnect:
+                break
+            try:
+                v = json.loads(msg)
+            except (ValueError, TypeError):
+                continue
+            async with view_lock:
+                view = v
+                seq = v.get("seq", 0)
+                settle = bool(v.get("settle", False))
+
+    async def sender():
+        nonlocal closed
+        last_seq = -1
+        last_settle = None
+        while not closed:
+            async with view_lock:
+                v = view
+                s = seq
+                st = settle
+            if v is None or (s == last_seq and st == last_settle):
+                await asyncio.sleep(0.003)
+                continue
+            last_seq, last_settle = s, st
+            # Preview downscale while moving; full-res on settle.
+            w = int(v.get("w", 320))
+            h = int(v.get("h", 200))
+            if not st and w > PREVIEW_MAX_W:
+                h = max(1, round(h * PREVIEW_MAX_W / w))
+                w = PREVIEW_MAX_W
+            rv = dict(v)
+            rv["w"], rv["h"] = w, h
+            # While moving, cap iterations so previews stay ~10ms/frame
+            # (smooth motion). Full iteration depth only on settle.
+            it = min(int(rv.get("maxIter", 400)), MAX_ITER_FP32)
+            if not st:
+                it = min(it, 900)
+            rv["maxIter"] = it
+            try:
+                # Render directly on the event loop: previews are ~3ms of
+                # blocking, and skipping the executor removes per-frame
+                # scheduling latency (~10ms+ on Windows).
+                raw = _render_now(rv)
+            except Exception:
+                break
+            try:
+                await ws.send_bytes(struct.pack("<II", w, h) + raw)
+            except Exception:
+                closed = True
+                break
+
+    try:
+        await asyncio.gather(receiver(), sender())
+    finally:
+        closed = True
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 
 _static_dir = Path(__file__).resolve().parent.parent / "static"

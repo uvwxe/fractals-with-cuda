@@ -7,4 +7,5 @@ dependencies = [
     "cupy-cuda12x[ctk]>=14.2",
     "fastapi>=0.141",
     "uvicorn>=0.52",
+    "websockets>=17.0",
 ]

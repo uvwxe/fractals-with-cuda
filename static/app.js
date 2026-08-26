@@ -2,7 +2,6 @@
 
 const MIN_SCALE = 1e-14;
 const MAX_SCALE = 10;
-const FADE_MS = 150;
 
 const state = {
   centerRe: -0.6, centerIm: 0, scale: 3.4, mode: 0,
@@ -28,7 +27,10 @@ const toast = document.getElementById('toast');
 
 let defaultView = null;
 
-const gl = canvas.getContext('webgl2');
+// preserveDrawingBuffer: keep the last frame on screen without redrawing every
+// rAF — browser GPU goes idle between CUDA frames instead of contending with
+// the render server for the same WDDM device.
+const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true });
 if (!gl) {
   toast.textContent = 'WebGL2 not supported in this browser';
   toast.classList.add('show');
@@ -86,36 +88,37 @@ function createTexture() {
 }
 
 let curTex = createTexture();
-let spareTex = createTexture();
 let hasFrame = false;
-let fading = false;
-let fadeStart = 0;
-let oldTex = null;
-let oldXf = null;
-let displayTransform = { sx: 1, sy: 1, tx: 0, ty: 0 };
 
-function draw(tex, xf, alpha) {
-  gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.uniform4f(uXfLoc, xf.sx, xf.sy, xf.tx, xf.ty);
-  gl.uniform1f(uAlphaLoc, alpha);
+function draw() {
+  gl.bindTexture(gl.TEXTURE_2D, curTex);
+  gl.uniform4f(uXfLoc, 1, 1, 0, 0);   // identity: no texture stretching
+  gl.uniform1f(uAlphaLoc, 1);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
+// Continuous render pump: while the view is dirty (and no render in flight),
+// fire a REAL GPU render for the current state every animation frame. No
+// crossfade, no texture-stretch zoom — every displayed frame is freshly
+// computed on the GPU, so zooming is a genuine continuous render, not a
+// slideshow. During motion we send view updates (server renders cheap previews
+// and streams frames back); on settle we request one full-resolution pass.
+let settleSent = true;
 function frame(now) {
   requestAnimationFrame(frame);
   if (anim) stepAnim(now);
-  gl.viewport(0, 0, canvas.width, canvas.height);
-  gl.clearColor(0, 0, 0, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT);
-  if (!hasFrame) return;
-  if (fading) {
-    const t = Math.min(1, (now - fadeStart) / FADE_MS);
-    draw(oldTex, oldXf, 1);
-    draw(curTex, displayTransform, t);
-    if (t >= 1) fading = false;
-  } else {
-    draw(curTex, displayTransform, 1);
+  const settling = now - lastDirtyAt > 250;
+  if (dirty) {
+    dirty = false;
+    settleSent = false;
+    sendView(false);
+  } else if (!settleSent && settling && hasFrame) {
+    settleSent = true;
+    sendView(true);
   }
+  // No per-rAF clear/draw: the canvas keeps the last CUDA frame (preserved
+  // drawing buffer). Redrawing every rAF made the browser compositor contend
+  // with CUDA on the shared WDDM GPU, capping the pipeline at ~10fps.
 }
 requestAnimationFrame(frame);
 
@@ -126,69 +129,79 @@ function showToast(msg) {
   showToast._t = setTimeout(() => toast.classList.remove('show'), 3000);
 }
 
-function uploadFrame(px) {
-  const w = canvas.width;
-  const h = canvas.height;
-  const old = hasFrame ? { tex: curTex, xf: { ...displayTransform } } : null;
-  const swap = curTex;
-  curTex = spareTex;
-  spareTex = swap;
+function uploadFrame(px, w, h) {
   gl.bindTexture(gl.TEXTURE_2D, curTex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, w, h, 0, gl.RGB, gl.UNSIGNED_BYTE, px);
-  displayTransform = { sx: 1, sy: 1, tx: 0, ty: 0 };
-  if (old) {
-    oldTex = old.tex;
-    oldXf = old.xf;
-    fadeStart = performance.now();
-    fading = true;
-  } else {
-    hasFrame = true;
-  }
+  hasFrame = true;
+  // Present the new frame immediately; this is the ONLY per-frame GPU work in
+  // the browser, so it never fights the CUDA pipeline for long.
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  draw();
 }
 
-let inFlight = false;
-let dirty = false;
 let renderSeq = 0;      // monotonic token: bump when state changes meaningfully
-let lastRenderedSeq = 0;
+let lastDirtyAt = 0;
+let dirty = false;
 
-async function requestRender() {
-  if (inFlight) { dirty = true; return; }
-  refreshAdaptive();
-  const mySeq = ++renderSeq;
-  inFlight = true;
-  try {
-    const res = await fetch('/render', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        w: canvas.width, h: canvas.height,
-        centerRe: state.centerRe, centerIm: state.centerIm, scale: state.scale,
-        juliaRe: state.juliaRe, juliaIm: state.juliaIm,
-        maxIter: state.maxIter, mode: state.mode, palette: state.palette,
-        interior: state.interior, ssaa: state.ssaa, precision: state.precision
-      })
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const buf = await res.arrayBuffer();
-    // Drop stale responses: a newer interaction invalidated this frame's state.
-    // Uploading it would reset displayTransform and snap the view back.
-    if (mySeq >= lastRenderedSeq && buf.byteLength === canvas.width * canvas.height * 3) {
-      lastRenderedSeq = mySeq;
-      uploadFrame(new Uint8Array(buf));
-      hudRender.textContent = `render ${res.headers.get('X-Render-Ms')} ms`;
+// ---- WebSocket streaming renderer -----------------------------------------
+// The client sends view updates (JSON) over a WebSocket; the server renders
+// back-to-back and pushes binary frames (u32le width + u32le height + RGB).
+// This pipelines the GPU so zoom is continuous — no per-request latency.
+let ws = null;
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  ws = new WebSocket(proto + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => renderNow();
+  ws.onmessage = (ev) => {
+    const dv = new DataView(ev.data);
+    const w = dv.getUint32(0, true);
+    const h = dv.getUint32(4, true);
+    const px = new Uint8Array(ev.data, 8);
+    if (px.byteLength === w * h * 3) {
+      uploadFrame(px, w, h);
+      hudRender.textContent = `render ${(w * h * 3 / 1024).toFixed(0)} KB`;
     }
-  } catch (err) {
+  };
+  ws.onclose = () => {
     showToast('GPU server unreachable — is uvicorn running?');
-  } finally {
-    inFlight = false;
-    if (dirty) { dirty = false; requestRender(); }
-  }
+    setTimeout(connectWS, 800);
+  };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
 }
 
-let renderTimer = null;
+function sendView(settle) {
+  if (!ws || ws.readyState !== 1) return;
+  refreshAdaptive();
+  renderSeq++;
+  ws.send(JSON.stringify({
+    w: canvas.width, h: canvas.height,
+    centerRe: state.centerRe, centerIm: state.centerIm, scale: state.scale,
+    juliaRe: state.juliaRe, juliaIm: state.juliaIm,
+    maxIter: state.maxIter, mode: state.mode, palette: state.palette,
+    interior: state.interior, ssaa: state.ssaa, precision: state.precision,
+    seq: renderSeq, settle: !!settle
+  }));
+}
+
+// Mark the view dirty and remember when (for settle detection).
+function markDirty() {
+  lastDirtyAt = performance.now();
+  dirty = true;
+}
+
+// Inputs mark the view dirty; the rAF pump sends view updates continuously
+// (preview-res while moving, full-res once the user settles).
 function scheduleRender() {
-  clearTimeout(renderTimer);
-  renderTimer = setTimeout(requestRender, 120);
+  markDirty();
+}
+
+// Kick an immediate full-quality render (load / one-shot state change).
+function renderNow() {
+  dirty = false;
+  settleSent = true;
+  sendView(true);
 }
 
 // Zoom depth (magnification vs the full-set view). autoIter/precision scale
@@ -317,11 +330,10 @@ function stepAnim(now) {
   state.scale = Math.exp(logFrom + (logTo - logFrom) * e);
   state.centerRe = anim.from.centerRe + (anim.to.centerRe - anim.from.centerRe) * e;
   state.centerIm = anim.from.centerIm + (anim.to.centerIm - anim.from.centerIm) * e;
-  displayTransform = { sx: 1, sy: 1, tx: 0, ty: 0 };
   updateHud();
   if (now - anim.lastRender > 40) {
     anim.lastRender = now;
-    requestRender();
+    markDirty();
   }
   if (t >= 1) {
     const exact = { ...anim.to };
@@ -332,7 +344,7 @@ function stepAnim(now) {
     state.maxIter = autoIter();
     updateIterUI();
     updateHud();
-    requestRender();
+    renderNow();
   }
 }
 
@@ -360,8 +372,6 @@ function complexAt(px, py) {
 
 function panBy(dx, dy) {
   cancelAnim();
-  displayTransform.tx += dx / canvas.clientWidth;
-  displayTransform.ty += dy / canvas.clientHeight;
   const p = state.scale / canvas.clientWidth;
   state.centerRe -= dx * p;
   state.centerIm += dy * p;
@@ -372,11 +382,6 @@ function zoomAround(factor, cx, cy, fx, fy) {
   const c = complexAt(fx, fy);
   const old = state.scale;
   state.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, old / factor));
-  const mag = old / state.scale;
-  displayTransform.sx *= mag;
-  displayTransform.sy *= mag;
-  displayTransform.tx = displayTransform.tx * mag + cx * (1 - mag);
-  displayTransform.ty = displayTransform.ty * mag + cy * (1 - mag);
   const p = state.scale / canvas.clientWidth;
   state.centerRe = c.re - (fx - canvas.clientWidth / 2) * p;
   state.centerIm = c.im + (fy - canvas.clientHeight / 2) * p;
@@ -468,10 +473,9 @@ function handleClick(cx, cy) {
   state.centerRe = 0;
   state.centerIm = 0;
   state.scale = 3.4;
-  displayTransform = { sx: 1, sy: 1, tx: 0, ty: 0 };
   updateModeUI();
   updateHud();
-  requestRender();
+  renderNow();
 }
 
 canvas.addEventListener('wheel', e => {
@@ -485,13 +489,13 @@ canvas.addEventListener('wheel', e => {
 modeBtns.forEach(b => b.addEventListener('click', () => {
   state.mode = +b.dataset.mode;
   updateModeUI();
-  requestRender();
+  renderNow();
 }));
 
 paletteDots.forEach(b => b.addEventListener('click', () => {
   state.palette = +b.dataset.palette;
   updatePaletteUI();
-  requestRender();
+  renderNow();
 }));
 
 presetSelect.addEventListener('change', () => {
@@ -510,12 +514,12 @@ ssaaBtn.addEventListener('click', () => {
   if (state.precision === 1) return;
   state.ssaa = state.ssaa === 1 ? 2 : 1;
   updateSsaaUI();
-  requestRender();
+  renderNow();
 });
 
 precisionBtn.addEventListener('click', () => {
   setPrecision(1 - state.precision);
-  requestRender();
+  renderNow();
 });
 
 resetBtn.addEventListener('click', resetAll);
@@ -528,17 +532,17 @@ window.addEventListener('keydown', e => {
     case 'm':
       state.mode = 1 - state.mode;
       updateModeUI();
-      requestRender();
+      renderNow();
       break;
     case 'f':
       setPrecision(1 - state.precision);
-      requestRender();
+      renderNow();
       break;
     case 'q':
       if (state.precision === 0) {
         state.ssaa = state.ssaa === 1 ? 2 : 1;
         updateSsaaUI();
-        requestRender();
+        renderNow();
       }
       break;
     case '[': setIter(Math.max(+iterSlider.min, Math.floor(state.maxIter / 2))); break;
@@ -547,7 +551,7 @@ window.addEventListener('keydown', e => {
   if (e.key >= '1' && e.key <= '4') {
     state.palette = +e.key - 1;
     updatePaletteUI();
-    requestRender();
+    renderNow();
   }
 });
 
@@ -558,7 +562,6 @@ function onResize() {
   if (w !== canvas.width || h !== canvas.height) {
     canvas.width = w;
     canvas.height = h;
-    displayTransform = { sx: 1, sy: 1, tx: 0, ty: 0 };
     scheduleRender();
   }
 }
@@ -600,4 +603,4 @@ fetch('/health')
 
 setTimeout(() => hint.classList.add('hidden'), 6000);
 
-requestRender();
+connectWS();
