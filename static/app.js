@@ -37,6 +37,7 @@ if (!gl) {
 
 gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 gl.enable(gl.BLEND);
+// Straight (non-premultiplied) alpha: fragment outputs vec4(rgb, alpha).
 gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
 function compileShader(type, src) {
@@ -53,7 +54,7 @@ out vec2 v_uv;
 void main() {
   vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 0.5;
   gl_Position = vec4(p * 4.0 - 1.0, 0.0, 1.0);
-  v_uv = vec2(p.x, 1.0 - p.y);
+  v_uv = p * 2.0;
 }`));
 gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, `#version 300 es
 precision highp float;
@@ -64,7 +65,8 @@ in vec2 v_uv;
 out vec4 fragColor;
 void main() {
   vec2 uv = vec2(u_xf.x * v_uv.x + u_xf.z, u_xf.y * v_uv.y + u_xf.w);
-  fragColor = vec4(texture(u_tex, uv).rgb * u_alpha, u_alpha);
+  vec3 rgb = texture(u_tex, uv).rgb;
+  fragColor = vec4(rgb, u_alpha);
 }`));
 gl.linkProgram(program);
 if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
@@ -146,9 +148,13 @@ function uploadFrame(px) {
 
 let inFlight = false;
 let dirty = false;
+let renderSeq = 0;      // monotonic token: bump when state changes meaningfully
+let lastRenderedSeq = 0;
 
 async function requestRender() {
   if (inFlight) { dirty = true; return; }
+  refreshAdaptive();
+  const mySeq = ++renderSeq;
   inFlight = true;
   try {
     const res = await fetch('/render', {
@@ -164,10 +170,13 @@ async function requestRender() {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const buf = await res.arrayBuffer();
-    if (buf.byteLength === canvas.width * canvas.height * 3) {
+    // Drop stale responses: a newer interaction invalidated this frame's state.
+    // Uploading it would reset displayTransform and snap the view back.
+    if (mySeq >= lastRenderedSeq && buf.byteLength === canvas.width * canvas.height * 3) {
+      lastRenderedSeq = mySeq;
       uploadFrame(new Uint8Array(buf));
+      hudRender.textContent = `render ${res.headers.get('X-Render-Ms')} ms`;
     }
-    hudRender.textContent = `render ${res.headers.get('X-Render-Ms')} ms`;
   } catch (err) {
     showToast('GPU server unreachable — is uvicorn running?');
   } finally {
@@ -180,6 +189,45 @@ let renderTimer = null;
 function scheduleRender() {
   clearTimeout(renderTimer);
   renderTimer = setTimeout(requestRender, 120);
+}
+
+// Zoom depth (magnification vs the full-set view). autoIter/precision scale
+// with depth so boundary detail stays crisp instead of washing into black.
+function zoomMag() {
+  return 3.4 / state.scale;
+}
+
+// Leave room for hand-tuned iterations: only auto-raise when the user hasn't
+// manually moved the slider away from the auto-computed value.
+let userPinnedIter = false;
+iterSlider.addEventListener('input', () => { userPinnedIter = true; });
+
+function autoIter() {
+  let m = Math.round(state.maxIter);
+  const mag = zoomMag();
+  // Iterations rise with depth but saturate: hundreds of iters already resolve
+  // structure; thousands mostly hurt fps. Ceiling lower in fp64 (slow).
+  const ceiling = state.precision === 1 ? 4000 : 12000;
+  const needed = Math.round(400 * (1 + Math.sqrt(Math.min(mag, 20000)) * 0.9));
+  if (!userPinnedIter) {
+    m = Math.min(ceiling, Math.max(state.maxIter, needed));
+  }
+  return m;
+}
+
+function autoPrecision() {
+  // Measured on RTX 3050: fp32 smears into digital noise around scale 1e-5
+  // (clean to ~1e-4, noisy at 1e-5). Engage fp64 from 1e-4 so deep-zoom
+  // boundary detail stays crisp instead of turning to "snow". Manual override wins.
+  return state.precision === 1 || state.scale < 1e-4 ? 1 : 0;
+}
+
+// Fresh iteration/precision for the CURRENT depth.
+function refreshAdaptive() {
+  const it = autoIter();
+  if (it !== state.maxIter) { state.maxIter = it; updateIterUI(); }
+  const prec = autoPrecision();
+  if (prec !== state.precision) setPrecision(prec);
 }
 
 function formatMag(n) {
@@ -240,6 +288,7 @@ let anim = null;
 const EASE = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 
 function animateTo(target, dur = 1400) {
+  userPinnedIter = false;          // preset/reset resumes adaptive iterations
   const from = { centerRe: state.centerRe, centerIm: state.centerIm, scale: state.scale };
   const to = {
     centerRe: target.centerRe ?? state.centerRe,
@@ -280,6 +329,8 @@ function stepAnim(now) {
     state.scale = exact.scale;
     state.centerRe = exact.centerRe;
     state.centerIm = exact.centerIm;
+    state.maxIter = autoIter();
+    updateIterUI();
     updateHud();
     requestRender();
   }
@@ -329,6 +380,7 @@ function zoomAround(factor, cx, cy, fx, fy) {
   const p = state.scale / canvas.clientWidth;
   state.centerRe = c.re - (fx - canvas.clientWidth / 2) * p;
   state.centerIm = c.im + (fy - canvas.clientHeight / 2) * p;
+  refreshAdaptive();
 }
 
 const pointers = new Map();
