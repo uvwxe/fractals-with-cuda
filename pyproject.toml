@@ -1,0 +1,10 @@
+[project]
+name = "fractals-with-cuda"
+version = "0.1.0"
+description = "Real-time Mandelbrot and Julia fractal explorer rendered on the GPU with raw CUDA kernels"
+requires-python = ">=3.12"
+dependencies = [
+    "cupy-cuda12x[ctk]>=14.2",
+    "fastapi>=0.141",
+    "uvicorn>=0.52",
+]
