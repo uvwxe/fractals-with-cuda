@@ -116,7 +116,11 @@ void fractal_kernel(
                 }
                 if (t < 0.0) {
                     unsigned char v = (interior == 1) ? (unsigned char)255 : (unsigned char)0;
-                    r = v; g = v; b = v;
+                    if (interior == 2) {
+                        r = (unsigned char)88; g = (unsigned char)104; b = (unsigned char)193;
+                    } else {
+                        r = v; g = v; b = v;
+                    }
                 } else {
                     palette_color(t, palette, r, g, b);
                 }
@@ -141,7 +145,17 @@ void fractal_kernel(
 
     if (t < 0.0) {
         unsigned char v = (interior == 1) ? (unsigned char)255 : (unsigned char)0;
-        out[idx] = v; out[idx + 1] = v; out[idx + 2] = v;
+        if (interior == 2) {
+            // Preview placeholder: point did NOT escape within the (capped)
+            // iteration budget — at deep zoom this is usually a boundary pixel
+            // that simply needs more iterations, not true interior. A dim
+            // violet reads as 'computing' instead of a broken black void.
+            out[idx] = (unsigned char)88;
+            out[idx + 1] = (unsigned char)104;
+            out[idx + 2] = (unsigned char)193;
+        } else {
+            out[idx] = v; out[idx + 1] = v; out[idx + 2] = v;
+        }
         return;
     }
     palette_color(t, palette, out[idx], out[idx + 1], out[idx + 2]);

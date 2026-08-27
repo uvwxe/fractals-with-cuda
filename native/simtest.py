@@ -209,21 +209,9 @@ def main():
 
             if dirty:
                 dirty = False
-                # MOTION: capped iters at FULL res (no pixelated downscale)
-                cap = 900 if sim.state.precision == 0 else 400
+                # FULL resolution + FULL iterations (measured: costs only
+                # ~18ms over a shallow cap and never leaves black voids)
                 v = sim.state.view(W, H)
-                v["maxIter"] = min(sim.state.max_iter, cap)
-                renderer.render_and_present(fractals._get_kernel(bool(sim.state.precision)), v)
-                last_px = W * H
-                dirty_count += 1
-                refine_stage = 0
-            elif refine_stage < REFINE_STAGES and time.perf_counter() - sim_last_input > 0.45:
-                # SETTLE: progressive sharpen at full richness (full res)
-                refine_stage += 1
-                total = sim.state.max_iter
-                it = max(int(total * (refine_stage / REFINE_STAGES)), 64)
-                v = sim.state.view(W, H)
-                v["maxIter"] = it
                 renderer.render_and_present(fractals._get_kernel(bool(sim.state.precision)), v)
                 last_px = W * H
                 dirty_count += 1
