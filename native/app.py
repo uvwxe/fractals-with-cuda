@@ -316,12 +316,32 @@ def main() -> int:
         nonlocal dirty
         dirty = True
 
+    # Preset hotkeys: jump to famous boundary coordinates so zooming ALWAYS
+    # lands on real structure (the set interior is pure black; zooming there
+    # shows nothing but black, which feels broken).
+    PRESETS = {
+        glfw.KEY_5: ("Seahorse Valley", -0.745, 0.113, 0.05),
+        glfw.KEY_6: ("Elephant Valley", 0.2825, 0.005, 0.045),
+        glfw.KEY_7: ("Triple Spiral", -0.088, 0.654, 0.04),
+        glfw.KEY_8: ("Satellite Minibrot", -1.768, 0.0009, 0.07),
+        glfw.KEY_9: ("Seahorse Deep", -0.743643887037151, 0.13182590420533, 0.0002),
+    }
+
     def on_key(_win, key, _scancode, action, _mods):
         nonlocal anim, dirty
         if action != glfw.PRESS:
             return
         if key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(window, True)
+        elif key in PRESETS:
+            name, cre, cim, scale = PRESETS[key]
+            state.precision_pin = None
+            state.iter_pin = None
+            anim = {"t0": time.perf_counter(), "dur": 1.2,
+                    "from": {"centerRe": state.centerRe, "centerIm": state.centerIm,
+                             "scale": state.scale},
+                    "to": {"centerRe": cre, "centerIm": cim, "scale": scale}}
+            print(f"fly to presets: {name}", flush=True)
         elif key == glfw.KEY_R:
             state.precision_pin = None
             state.iter_pin = None
@@ -461,15 +481,16 @@ def main() -> int:
                     state.centerIm += dy * state.scale / w
                     dirty = True
 
-            # reset fly-in: keyframe ease from wherever we are to FULL_SET
+            # reset/preset fly-in: keyframe ease from wherever we are to anim["to"]
             if anim is not None:
                 t = min(1.0, (time.perf_counter() - anim["t0"]) / anim["dur"])
                 e = ease(t)
                 f = anim["from"]
-                log_s = math.log(f["scale"]) + (math.log(FULL_SET["scale"]) - math.log(f["scale"])) * e
+                g = anim.get("to", FULL_SET)
+                log_s = math.log(f["scale"]) + (math.log(g["scale"]) - math.log(f["scale"])) * e
                 state.scale = min(MAX_SCALE, max(MIN_SCALE, math.exp(log_s)))
-                state.centerRe = f["centerRe"] + (FULL_SET["centerRe"] - f["centerRe"]) * e
-                state.centerIm = f["centerIm"] + (FULL_SET["centerIm"] - f["centerIm"]) * e
+                state.centerRe = f["centerRe"] + (g["centerRe"] - f["centerRe"]) * e
+                state.centerIm = f["centerIm"] + (g["centerIm"] - f["centerIm"]) * e
                 state.refresh_adaptive()
                 dirty = True
                 if t >= 1.0:
@@ -511,7 +532,8 @@ def main() -> int:
                     f"fractals — {'Julia' if state.mode else 'Mandelbrot'} · "
                     f"×{format_mag(mag)} · {'fp64' if state.precision else 'fp32'} · "
                     f"iter {state.max_iter} · gpu ~{pred:.1f} ms · "
-                    f"res {int(res_factor * 100)}% · ~{min(fps_ema, 62):.0f} fps"))
+                    f"res {int(res_factor * 100)}% · ~{min(fps_ema, 62):.0f} fps · "
+                    f"5-9 presets | zoom at the EDGE not the black"))
 
             glfw.swap_buffers(window)
     finally:
