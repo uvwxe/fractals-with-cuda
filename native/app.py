@@ -277,6 +277,16 @@ def main() -> int:
     last_render_ms = 0.0
     fps_ema = 60.0
     dirty = True
+    last_input_t = 0.0
+    # Progressive refinement: motion renders cap iterations (fast previews at
+    # FULL resolution — no pixelated downscale); once the user stops, the
+    # image sharpens through stages to the full iteration count.
+    refine_stage = 0          # 0 = motion, 1..N = settle stages (N done)
+    REFINE_STAGES = 3
+
+    def mark_input():
+        nonlocal last_input_t
+        last_input_t = time.perf_counter()
 
     def cursor_pos():
         return glfw.get_cursor_pos(window)
@@ -292,9 +302,11 @@ def main() -> int:
 
     def on_scroll(_win, _dx, dy):
         scroll_queue.append(dy)
+        mark_input()
 
     def on_button(_win, button, action, _mods):
         nonlocal dragging, drag_prev
+        mark_input()
         w, h = framebuffer()
         if button == glfw.MOUSE_BUTTON_LEFT:
             if action == glfw.PRESS:
@@ -331,6 +343,7 @@ def main() -> int:
         nonlocal anim, dirty
         if action != glfw.PRESS:
             return
+        mark_input()
         if key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(window, True)
         elif key in PRESETS:
@@ -377,13 +390,13 @@ def main() -> int:
     glfw.set_mouse_button_callback(window, on_button)
     glfw.set_key_callback(window, on_key)
 
-    def render_frame(w: int, h: int):
+    def render_frame(w: int, h: int, v: dict):
         nonlocal last_render_ms
         t0 = time.perf_counter()
         if (w, h) != (renderer.w, renderer.h):
             renderer.alloc(w, h)
         kernel = fractals._get_kernel(bool(state.precision))
-        renderer.render_and_present(kernel, state.view(w, h))
+        renderer.render_and_present(kernel, v)
         last_render_ms = (time.perf_counter() - t0) * 1000.0
 
     def ease(t: float) -> float:
@@ -395,7 +408,7 @@ def main() -> int:
         timings = []
         for _ in range(30):
             t0 = time.perf_counter()
-            render_frame(w, h)
+            render_frame(w, h, state.view(w, h))
             timings.append((time.perf_counter() - t0) * 1000)
             glfw.swap_buffers(window)
             glfw.poll_events()
@@ -405,13 +418,13 @@ def main() -> int:
         deep = []
         for _ in range(8):
             t0 = time.perf_counter()
-            render_frame(w, h)
+            render_frame(w, h, state.view(w, h))
             deep.append((time.perf_counter() - t0) * 1000)
             glfw.swap_buffers(window)
             glfw.poll_events()
         state.ssaa = 2
         state.refresh_adaptive()
-        render_frame(w, h)  # exercise ssaa + fp64 kernel path
+        render_frame(w, h, state.view(w, h))  # exercise ssaa + fp64 kernel path
         glfw.swap_buffers(window)
         print("bench: sustained 120 frames...", flush=True)
         state.scale = FULL_SET["scale"]
@@ -420,7 +433,7 @@ def main() -> int:
         # sustained throughput: back-to-back frames, wall clock
         t0 = time.perf_counter()
         for _ in range(120):
-            render_frame(w, h)
+            render_frame(w, h, state.view(w, h))
             glfw.swap_buffers(window)
             glfw.poll_events()
         sustained = (time.perf_counter() - t0) / 120 * 1000
@@ -498,12 +511,35 @@ def main() -> int:
 
             state.refresh_adaptive()
 
+            # ---- render: motion (capped iters, FULL res) or refine stage ----
             if dirty:
                 dirty = False
-                rw = max(2, round(w * res_factor))
-                rh = max(2, round(h * res_factor))
-                render_frame(rw, rh)
-                last_px = rw * rh
+                refine_stage = 0  # any new input restarts refinement
+                # Motion renders use a capped iteration count so the preview
+                # stays fast at FULL resolution: fp32 900 iters (~22ms, the
+                # sync floor), fp64 400 iters (~19ms) — a structure-rich
+                # preview without a 186ms chain (which felt like 2fps) and
+                # without the pixelated downscale adaptive-res used to force.
+                cap = 900 if state.precision == 0 else 400
+                v = state.view(w, h)
+                v["maxIter"] = min(state.max_iter, cap)
+                render_frame(w, h, v)
+                last_px = w * h
+            elif (
+                refine_stage < REFINE_STAGES
+                and time.perf_counter() - last_input_t > 0.45
+            ):
+                # Settle: the user stopped >0.45s — sharpen through stages at
+                # FULL richness. Only the last stage runs the full maxIter;
+                # earlier stages render a share of it so the image visibly
+                # refines instead of freezing on one 186ms render.
+                refine_stage += 1
+                total = state.max_iter
+                it = max(int(total * (refine_stage / REFINE_STAGES)), 64)
+                v = state.view(w, h)
+                v["maxIter"] = it
+                render_frame(w, h, v)
+                last_px = w * h
             else:
                 renderer.present_last()  # keep vsync present while idle
 
@@ -515,10 +551,13 @@ def main() -> int:
             now = time.perf_counter()
             if now - last_title > 0.25:
                 last_title = now
-                # Adaptive resolution from a predicted kernel time (no CUDA
-                # syncs in the loop — any host sync costs ~20ms on WDDM):
-                # cost scales linearly with pixels x iterations.
-                pred = predict_ms(state.precision, last_px, state.max_iter)
+                # Adaptive resolution from a predicted MOTION-capped kernel
+                # time (no CUDA syncs in the loop — any host sync costs ~20ms
+                # on WDDM): motion iters are capped, so the prediction at
+                # full res stays well under budget and res_factor stays 1.0 —
+                # no downscaled pixelation during zoom.
+                cap = 900 if state.precision == 0 else 400
+                pred = predict_ms(state.precision, last_px, min(state.max_iter, cap))
                 if pred > 24.0 and res_factor > 0.25:
                     res_factor = max(0.25, res_factor * 0.75)
                     dirty = True

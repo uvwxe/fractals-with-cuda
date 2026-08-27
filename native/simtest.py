@@ -123,10 +123,14 @@ def main():
     hitches = []
     dirty_count = 0
     drag_x = 0.0
+    sim_last_input = time.perf_counter()
+    refine_stage = 0
+    REFINE_STAGES = 3
 
     def decide_res():
         nonlocal res_factor, dirty, last_px
-        pred = predict_ms(sim.state.precision, last_px, sim.state.max_iter)
+        cap = 900 if sim.state.precision == 0 else 400
+        pred = predict_ms(sim.state.precision, last_px, min(sim.state.max_iter, cap))
         prev = res_factor
         if pred > 24.0 and res_factor > 0.25:
             res_factor = max(0.25, res_factor * 0.75)
@@ -135,7 +139,7 @@ def main():
             res_factor = min(1.0, res_factor / 0.75)
             dirty = True
         if res_factor != prev:
-            print(f"  res {prev:.2f}->{res_factor:.2f} (pred {pred:.1f}ms, {sim.state.max_iter} iter, prec {sim.state.precision})", flush=True)
+            print(f"  res {prev:.2f}->{res_factor:.2f} (pred {pred:.1f}ms cap-iter, {sim.state.max_iter} full iter, prec {sim.state.precision})", flush=True)
 
     def queued_guard():
         # count of renders since last adapt happened implicitly through pacing
@@ -200,14 +204,28 @@ def main():
             # main-loop math
             w, h = W, H
             dirty = sim.step(dt, dirty)
+            if sim.scroll_queue or sim.zoom_vel > 1e-3 or sim.dragging:
+                sim_last_input = time.perf_counter()
 
             if dirty:
                 dirty = False
-                rw = max(2, round(w * res_factor))
-                rh = max(2, round(h * res_factor))
-                renderer.render_and_present(fractals._get_kernel(bool(sim.state.precision)),
-                                            sim.state.view(rw, rh))
-                last_px = rw * rh
+                # MOTION: capped iters at FULL res (no pixelated downscale)
+                cap = 900 if sim.state.precision == 0 else 400
+                v = sim.state.view(W, H)
+                v["maxIter"] = min(sim.state.max_iter, cap)
+                renderer.render_and_present(fractals._get_kernel(bool(sim.state.precision)), v)
+                last_px = W * H
+                dirty_count += 1
+                refine_stage = 0
+            elif refine_stage < REFINE_STAGES and time.perf_counter() - sim_last_input > 0.45:
+                # SETTLE: progressive sharpen at full richness (full res)
+                refine_stage += 1
+                total = sim.state.max_iter
+                it = max(int(total * (refine_stage / REFINE_STAGES)), 64)
+                v = sim.state.view(W, H)
+                v["maxIter"] = it
+                renderer.render_and_present(fractals._get_kernel(bool(sim.state.precision)), v)
+                last_px = W * H
                 dirty_count += 1
             else:
                 renderer.present_last()
