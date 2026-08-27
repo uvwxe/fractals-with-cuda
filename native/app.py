@@ -22,13 +22,13 @@ import cupy as cp
 from native.interop import CudaGLError, GlCudaBuffer, prefer_discrete_gpu, sys_executable
 from server import fractals
 
-MIN_SCALE = 1e-8
+MIN_SCALE = 2e-8
 MAX_SCALE = 10.0
 FULL_SET = {"centerRe": -0.6, "centerIm": 0.0, "scale": 3.4}
 
 
 def auto_iter(mag: float, precision: int) -> int:
-    ceiling = 4000 if precision else 12000
+    ceiling = 6000 if precision else 12000
     return int(min(ceiling, round(400 * (1 + math.sqrt(min(mag, 20000)) * 0.9))))
 
 
@@ -556,12 +556,14 @@ def main() -> int:
                 loop_fps = 1.0 / max(time.perf_counter() - last_t, 1e-6)
                 fps_ema = fps_ema * 0.7 + min(loop_fps, 62) * 0.3
                 mag = FULL_SET["scale"] / state.scale
+                limit_hint = " ⚠ DOUBLE PRECISION LIMIT — can't go deeper" if state.scale <= MIN_SCALE * 1.01 else ""
                 glfw.set_window_title(window, (
                     f"fractals — {'Julia' if state.mode else 'Mandelbrot'} · "
                     f"×{format_mag(mag)} · {'fp64' if state.precision else 'fp32'} · "
                     f"iter {state.max_iter} · gpu ~{pred:.1f} ms · "
                     f"res {int(res_factor * 100)}% · ~{min(fps_ema, 62):.0f} fps · "
-                    f"5-9 presets | zoom at the EDGE not the black"))
+                    f"5-9 presets | zoom at the EDGE not the black"
+                    f"{limit_hint}"))
 
             glfw.swap_buffers(window)
     finally:

@@ -155,6 +155,7 @@ def main():
         ("drag", 1.2),
         ("deep-fp64", 2.8),
         ("long-zoom", 20.0),
+        ("zoom-to-limit", 40.0),
     ]
     t0_real = time.perf_counter()
     elapsed_real = 0.0
@@ -185,6 +186,8 @@ def main():
                 print("phase: deep-fp64", flush=True)
             if phase_name == "long-zoom" and phase_elapsed == 0.0:
                 print("phase: long-zoom (continuous wheel 20s)", flush=True)
+            if phase_name == "zoom-to-limit" and phase_elapsed == 0.0:
+                print("phase: zoom-to-limit (wheel held; must reach MIN_SCALE)", flush=True)
 
             if phase_name == "zoom-x60" and wheel_ticks < 60:
                 if wheel_ticks % 3 == 0:
@@ -192,6 +195,10 @@ def main():
                 wheel_ticks += 1
             if phase_name == "long-zoom":
                 # continuous wheel: ~30 events/s for the whole 20s phase
+                long_ticks += 1
+                if long_ticks % 2 == 0:
+                    sim.on_scroll(None, 0, 1)
+            if phase_name == "zoom-to-limit":
                 long_ticks += 1
                 if long_ticks % 2 == 0:
                     sim.on_scroll(None, 0, 1)
