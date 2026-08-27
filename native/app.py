@@ -42,6 +42,29 @@ def format_mag(n: float) -> str:
     return f"{n:.1f}"
 
 
+# Kernel-cost calibration. Event timing on this machine is polluted by the
+# WDDM flush tax (~20ms per host-observable CUDA sync), so probes never trust
+# event elapsed times. Instead use the trusted kernel measurements:
+#   fp32 0.26ms @ 1080p (2,073,600 px), 400 iters   -> cost-per-px-iter
+#   fp64 is ~161x fp32 at equal size/iters (consumer fp64 rate)
+_PROBE = {"fp32": 0.26 * (65536 / 2073600) * (256 / 400), "fp64": None}
+_PROBE["fp64"] = _PROBE["fp32"] * 161.0
+_PROBE_PX = 256 * 256
+_PROBE_ITERS = 256
+
+
+def calibrate_probes() -> None:
+    """No-op: probes are constants (see module docstring). Kept for API
+    compatibility with callers; NEVER measure kernel time with CUDA events on
+    this machine — a single host sync costs ~20ms and inflates the result."""
+    pass
+
+
+def predict_ms(precision: int, pixels: int, iters: int) -> float:
+    probe = _PROBE["fp32" if precision == 0 else "fp64"]
+    return probe * (max(pixels, 1) / _PROBE_PX) * (max(iters, 1) / _PROBE_ITERS)
+
+
 class AppState:
     def __init__(self):
         self.centerRe = FULL_SET["centerRe"]
@@ -151,6 +174,15 @@ class Renderer:
         return nbytes
 
     def alloc(self, w: int, h: int):
+        # Drain the pipeline BEFORE touching GL/CUDA resources: if frames
+        # referencing the current PBO/texture are still in flight, unmapping
+        # or deleting them can hang forever on WDDM. alloc is rare (resize /
+        # adaptive-res step), so one serialization here is fine.
+        try:
+            cp.cuda.get_current_stream().synchronize()
+            gl.glFinish()
+        except Exception:
+            pass
         self.w, self.h = w, h
         self.nbytes = 0
         for b in self.buffers:
@@ -222,6 +254,7 @@ def main() -> int:
 
     # CUDA after the GL context exists. Warmup JIT-compiles both kernels.
     fractals.warmup()
+    calibrate_probes()
     props = cp.cuda.runtime.getDeviceProperties(0)
     print(f"CUDA: {props['name'].decode()}", flush=True)
 
@@ -379,9 +412,9 @@ def main() -> int:
     # ---- main loop ----
     last_t = time.perf_counter()
     last_title = 0.0
+    last_drain = 0.0
     res_factor = 1.0          # internal render scale; drops when frames get heavy
-    frame_start = 0.0
-    res_factor_dirty = False
+    last_px = fb_w * fb_h
     try:
         while not glfw.window_should_close(window):
             dt = min(time.perf_counter() - last_t, 0.1)
@@ -439,10 +472,8 @@ def main() -> int:
                 dirty = False
                 rw = max(2, round(w * res_factor))
                 rh = max(2, round(h * res_factor))
-                t_frame = time.perf_counter()
                 render_frame(rw, rh)
-                frame_start = t_frame
-                res_factor_dirty = True
+                last_px = rw * rh
             else:
                 renderer.present_last()  # keep vsync present while idle
 
@@ -451,27 +482,39 @@ def main() -> int:
             if elapsed < 0.016:
                 time.sleep(0.016 - elapsed)
 
+            # Periodic pipeline drain (1Hz, ~20ms — 2% overhead). Without ANY
+            # host sync, the WDDM interop queue wedges after ~2s of async
+            # frames: the next sync hangs forever. This retires it regularly.
+            # (Measured: 1.0s interval is safe; 1.5s wedges.)
+            if time.perf_counter() - last_drain > 1.0:
+                last_drain = time.perf_counter()
+                try:
+                    cp.cuda.get_current_stream().synchronize()
+                    gl.glFinish()
+                except Exception:
+                    pass
+
             now = time.perf_counter()
             if now - last_title > 0.25:
                 last_title = now
-                # Sample true kernel time 4x/sec: one sync here is invisible
-                # (20ms/250ms) and drives the adaptive-resolution decision.
-                cp.cuda.get_current_stream().synchronize()
-                kernel_ms = (now - frame_start) * 1000.0 if frame_start else last_render_ms
-                if res_factor_dirty:
-                    res_factor_dirty = False
-                    if kernel_ms > 24.0 and res_factor > 0.25:
-                        res_factor = max(0.25, res_factor * 0.75)
-                        dirty = True
-                    elif kernel_ms < 9.0 and res_factor < 1.0:
-                        res_factor = min(1.0, res_factor / 0.75)
-                        dirty = True
-                fps_ema = fps_ema * 0.7 + (1000.0 / max(last_render_ms, 1e-6)) * 0.3
+                # Adaptive resolution from a predicted kernel time (no CUDA
+                # syncs in the loop — any host sync costs ~20ms on WDDM):
+                # cost scales linearly with pixels x iterations.
+                pred = predict_ms(state.precision, last_px, state.max_iter)
+                if pred > 24.0 and res_factor > 0.25:
+                    res_factor = max(0.25, res_factor * 0.75)
+                    dirty = True
+                elif pred < 8.0 and res_factor < 1.0:
+                    res_factor = min(1.0, res_factor / 0.75)
+                    dirty = True
+                loop_fps = 1.0 / max(time.perf_counter() - last_t, 1e-6)
+                fps_ema = fps_ema * 0.7 + min(loop_fps, 62) * 0.3
                 mag = FULL_SET["scale"] / state.scale
                 glfw.set_window_title(window, (
                     f"fractals — {'Julia' if state.mode else 'Mandelbrot'} · "
                     f"×{format_mag(mag)} · {'fp64' if state.precision else 'fp32'} · "
-                    f"iter {state.max_iter} · gpu {kernel_ms:.1f} ms · ~{min(fps_ema, 62):.0f} fps"))
+                    f"iter {state.max_iter} · gpu ~{pred:.1f} ms · "
+                    f"res {int(res_factor * 100)}% · ~{min(fps_ema, 62):.0f} fps"))
 
             glfw.swap_buffers(window)
     finally:
