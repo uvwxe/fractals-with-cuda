@@ -127,18 +127,18 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     participant Browser as static/app.js
-    participant WS as server/main.py<br/>/ws endpoint
+    participant WS as server/main.py<br/>ws endpoint
     participant RGBA as server/fractals.py<br/>render_async
     participant Web as WebGL2 canvas
-    participant API as /render, /health, /presets
+    participant API as render, health, presets endpoints
 
-    Browser->>Browser: wheel: markDirty();<br/>rAF pump sends view (seq, settle)
-    Browser->>WS: ws.send(view JSON)
-    WS->>RGBA: coalesce latest view,<br/>run_in_executor calls render_async
+    Browser->>Browser: wheel triggers markDirty<br/>rAF pump sends view seq and settle
+    Browser->>WS: ws.send view JSON
+    WS->>RGBA: coalesce latest view<br/>run_in_executor calls render_async
     RGBA->>RGBA: kernel on non-blocking stream<br/>async D2H to pinned buffer
-    RGBA-->>WS: PendingFrame.bytes() returns RGB
-    WS-->>Browser: binary frame (u32 w + u32 h + RGB)
-    Browser->>Web: uploadFrame() via texImage2D<br/>draw (preserveDrawingBuffer)
-    Browser->>API: GET /presets, /health (once at load)
+    RGBA-->>WS: PendingFrame.bytes returns RGB
+    WS-->>Browser: binary frame with w, h, and RGB
+    Browser->>Web: uploadFrame via texImage2D<br/>draw with preserveDrawingBuffer
+    Browser->>API: GET presets and health once at load
 ```
 
