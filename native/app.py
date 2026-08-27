@@ -22,13 +22,16 @@ import cupy as cp
 from native.interop import CudaGLError, GlCudaBuffer, prefer_discrete_gpu, sys_executable
 from server import fractals
 
-MIN_SCALE = 2e-8
+def min_scale() -> float:
+    return CAP["min_scale"]
+
+
 MAX_SCALE = 10.0
 FULL_SET = {"centerRe": -0.6, "centerIm": 0.0, "scale": 3.4}
 
 
 def auto_iter(mag: float, precision: int) -> int:
-    ceiling = 6000 if precision else 12000
+    ceiling = CAP["iter_ceiling_fp64"] if precision else CAP["iter_ceiling_fp32"]
     return int(min(ceiling, round(400 * (1 + math.sqrt(min(mag, 20000)) * 0.9))))
 
 
@@ -63,6 +66,55 @@ def calibrate_probes() -> None:
 def predict_ms(precision: int, pixels: int, iters: int) -> float:
     probe = _PROBE["fp32" if precision == 0 else "fp64"]
     return probe * (max(pixels, 1) / _PROBE_PX) * (max(iters, 1) / _PROBE_ITERS)
+
+
+# ---- Capability scaling ----------------------------------------------------
+# A hardcoded zoom floor + resolution cap was tuned to THIS RTX 3050 Laptop.
+# On a stronger card it needlessly limits depth/quality; on a weaker one it
+# over-promises. Probe the actual device and derive constants from what it
+# can genuinely do. run_probe() populates CAP for the lifetime of the app.
+CAP = {
+    "min_scale": 2e-8,     # fp64 precision wall (default from this machine)
+    "motion_wide": 768,    # motion render width (present-path cliff)
+    "iter_ceiling_fp64": 6000,
+    "iter_ceiling_fp32": 12000,
+    "device": "",
+}
+
+
+def run_probe() -> None:
+    """Tier the device by compute capability (authoritative fp64 rate flag:
+    CC 5.2-6.x / 9.x = 1:2 fp64, CC 7.x-8.x consumer = 1:32-1:64).
+
+    Real-time kernel timing at small sizes is launch-overhead dominated and
+    misestimates the fp64 slowdown (measured 4000 instead of 6000 iters —
+    the probe over-tuned the ceiling), so capability is authoritative.
+    """
+    import cupy as cp
+    try:
+        props = cp.cuda.runtime.getDeviceProperties(0)
+        CAP["device"] = props["name"].decode().replace("NVIDIA GeForce ", "")
+        major = int(props["major"])
+    except Exception:
+        return
+    if major <= 4 or (major == 5 and int(props.get("minor", 0)) >= 2):
+        CAP["iter_ceiling_fp64"] = 20000     # Kepler/older, 1:2 fp64
+        CAP["motion_wide"] = 1280
+    elif major == 6 or major == 9:
+        CAP["iter_ceiling_fp64"] = 20000     # Pascal & Ada workstation-class, 1:2
+        CAP["motion_wide"] = 1280
+    elif major == 7:
+        CAP["iter_ceiling_fp64"] = 10000     # Volta — 1:2 (V100) or consumer 1:32
+        CAP["motion_wide"] = 960
+    else:
+        # CC 8.x consumer (Ampere/Ada RTX): fp64 1:64 — measured on this
+        # RTX 3050 Laptop. Iteration ceiling 6000, motion width 768.
+        CAP["iter_ceiling_fp64"] = 6000
+        CAP["motion_wide"] = 768
+
+
+def scale_from_probe() -> dict:
+    return dict(CAP)
 
 
 class AppState:
@@ -256,6 +308,7 @@ def main() -> int:
 
     # CUDA after the GL context exists. Warmup JIT-compiles both kernels.
     fractals.warmup()
+    run_probe()
     calibrate_probes()
     props = cp.cuda.runtime.getDeviceProperties(0)
     print(f"CUDA: {props['name'].decode()}", flush=True)
@@ -444,7 +497,7 @@ def main() -> int:
     last_title = 0.0
     res_factor = 1.0          # internal render scale; drops when frames get heavy
     last_px = fb_w * fb_h
-    motion_wide = 768         # motion render width (full iters, LINEAR upscale)
+    motion_wide = CAP["motion_wide"]  # motion render width (full iters, LINEAR upscale)
     last_motion_at = time.perf_counter()
     try:
         while not glfw.window_should_close(window):
@@ -469,7 +522,7 @@ def main() -> int:
                 px, py = cursor_pos()
                 cre, cim = cursor_complex(px, py, w, h)
                 step = math.exp(max(-0.35, min(0.35, -zoom_vel * dt)))
-                new_scale = min(MAX_SCALE, max(MIN_SCALE, state.scale * step))
+                new_scale = min(MAX_SCALE, max(min_scale(), state.scale * step))
                 if new_scale != state.scale:
                     k = new_scale / state.scale
                     state.centerRe = cre - (cre - state.centerRe) * k
@@ -495,7 +548,7 @@ def main() -> int:
                 f = anim["from"]
                 g = anim.get("to", FULL_SET)
                 log_s = math.log(f["scale"]) + (math.log(g["scale"]) - math.log(f["scale"])) * e
-                state.scale = min(MAX_SCALE, max(MIN_SCALE, math.exp(log_s)))
+                state.scale = min(MAX_SCALE, max(min_scale(), math.exp(log_s)))
                 state.centerRe = f["centerRe"] + (g["centerRe"] - f["centerRe"]) * e
                 state.centerIm = f["centerIm"] + (g["centerIm"] - f["centerIm"]) * e
                 state.refresh_adaptive()
@@ -556,7 +609,7 @@ def main() -> int:
                 loop_fps = 1.0 / max(time.perf_counter() - last_t, 1e-6)
                 fps_ema = fps_ema * 0.7 + min(loop_fps, 62) * 0.3
                 mag = FULL_SET["scale"] / state.scale
-                limit_hint = " ⚠ DOUBLE PRECISION LIMIT — can't go deeper" if state.scale <= MIN_SCALE * 1.01 else ""
+                limit_hint = " ⚠ DOUBLE PRECISION LIMIT — can't go deeper" if state.scale <= min_scale() * 1.01 else ""
                 glfw.set_window_title(window, (
                     f"fractals — {'Julia' if state.mode else 'Mandelbrot'} · "
                     f"×{format_mag(mag)} · {'fp64' if state.precision else 'fp32'} · "
