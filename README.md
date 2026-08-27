@@ -92,3 +92,53 @@ Double precision (fp64) is the hard ceiling: ~**×170 million** magnification, w
 - `server/fractals.py` — the raw CUDA kernel source (fp32 + fp64 variants of one source), palettes, presets
 - `server/main.py` — FastAPI: `/render`, `/ws` (streaming WebSocket renders), `/health`, `/presets`
 - `static/` — vanilla JS + WebGL2 frontend (no build step)
+
+## How a zoom request flows
+
+### Native app (the main experience)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User
+    participant App as native/app.py<br/>main loop
+    participant State as AppState<br/>view state
+    participant K as server/fractals.py<br/>_get_kernel / _launch
+    participant PBO as mapped GL PBO<br/>(CUDA-OpenGL interop)
+    participant GL as Renderer<br/>(GL texture + quad)
+    participant Win as GLFW window
+
+    User->>App: wheel / drag / key (press 5-9, F, M, 1-4)
+    App->>App: on_scroll -> scroll_queue<br/>mark_input() -> last_input_t
+    App->>State: zoom_vel glide (clamped)<br/>scale/centerRe/centerIm update
+    App->>State: refresh_adaptive()<br/>auto_iter() + autoPrecision()<br/>(fp64 auto >1e-4, capped by CAP)
+    Note over State: 0.4s idle? -> settle sharpen to full res
+    App->>K: fractal_kernel <<launch>>
+    K->>PBO: one thread per pixel<br/>writes RGB (fp32/fp64, ssaa, palette)
+    App->>GL: texSubImage2D from PBO (GPU-to-GPU)
+    GL->>Win: drawArrays(fullscreen quad) -> present
+    App->>Win: swap_buffers + glfw.poll_events
+    App->>App: title HUD (mag, fps, res%)<br/>res_factor adapts, never pixelates
+```
+
+### Web version (FastAPI + WebSocket streaming)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Browser as static/app.js
+    participant WS as server/main.py<br/>/ws endpoint
+    participant RGBA as server/fractals.py<br/>render_async
+    participant Web as WebGL2 canvas
+    participant API as /render, /health, /presets
+
+    Browser->>Browser: wheel -> markDirty();<br/>rAF pump sends view {seq, settle}
+    Browser->>WS: ws.send(view JSON)
+    WS->>RGBA: coalesce latest view,<br/>run_in_executor -> render_async
+    RGBA->>RGBA: kernel on non-blocking stream<br/>async D2H to pinned buffer
+    RGBA-->>WS: PendingFrame.bytes() -> RGB
+    WS-->>Browser: binary frame (u32 w + u32 h + RGB)
+    Browser->>Web: uploadFrame() -> texImage2D<br/>draw (preserveDrawingBuffer)
+    Browser->>API: GET /presets, /health (once at load)
+```
+
