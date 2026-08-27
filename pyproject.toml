@@ -8,4 +8,6 @@ dependencies = [
     "fastapi>=0.141",
     "uvicorn>=0.52",
     "websockets>=17.0",
+    "glfw>=2.8",
+    "PyOpenGL>=3.1.10",
 ]
