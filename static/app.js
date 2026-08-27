@@ -228,11 +228,14 @@ function autoIter() {
   return m;
 }
 
+let precisionManual = false;
+
 function autoPrecision() {
-  // Measured on RTX 3050: fp32 smears into digital noise around scale 1e-5
-  // (clean to ~1e-4, noisy at 1e-5). Engage fp64 from 1e-4 so deep-zoom
-  // boundary detail stays crisp instead of turning to "snow". Manual override wins.
-  return state.precision === 1 || state.scale < 1e-4 ? 1 : 0;
+  // Manual override (fp64/fp32 button or deep showcase preset) wins and is
+  // sticky; otherwise follow depth. fp32 is clean to ~1e-4, beyond that fp64
+  // keeps boundary detail crisp instead of turning to "snow".
+  if (precisionManual) return state.precision;
+  return state.scale < 1e-4 ? 1 : 0;
 }
 
 // Fresh iteration/precision for the CURRENT depth.
@@ -290,6 +293,11 @@ function setPrecision(v) {
   updateSsaaUI();
 }
 
+function setPrecisionManual(v) {
+  precisionManual = true;
+  setPrecision(v);
+}
+
 function setIter(n) {
   state.maxIter = n;
   updateIterUI();
@@ -314,6 +322,9 @@ function animateTo(target, dur = 1400) {
   state.maxIter = target.maxIter ?? state.maxIter;
   state.palette = target.palette ?? state.palette;
   state.ssaa = target.ssaa ?? state.ssaa;
+  // Deep showcase presets (explicit fp64 at scale < 1e-3) pin fp64; reset and
+  // shallow presets resume auto precision so fp64 doesn't latch forever.
+  precisionManual = target.precision === 1 && (target.scale ?? state.scale) < 1e-3;
   setPrecision(target.precision ?? state.precision);
   updateModeUI();
   updatePaletteUI();
@@ -518,7 +529,7 @@ ssaaBtn.addEventListener('click', () => {
 });
 
 precisionBtn.addEventListener('click', () => {
-  setPrecision(1 - state.precision);
+  setPrecisionManual(1 - state.precision);
   renderNow();
 });
 
@@ -535,7 +546,7 @@ window.addEventListener('keydown', e => {
       renderNow();
       break;
     case 'f':
-      setPrecision(1 - state.precision);
+      setPrecisionManual(1 - state.precision);
       renderNow();
       break;
     case 'q':
