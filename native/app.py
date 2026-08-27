@@ -193,15 +193,13 @@ class Renderer:
             self.nbytes = self._alloc_one(b, w, h)
 
     def render_and_present(self, kernel, view: dict):
-        """CUDA kernel writes the mapped buffer; wait for it (always); GL
-        copies it to the texture and draws.
+        """CUDA kernel writes the mapped buffer; wait for it; GL copies it to
+        the texture and draws.
 
-        Per-frame sync is the classic, rock-solid CUDA-GL pattern: it never
-        accumulates async work, so it can't hit the driver states that hang
-        long async sessions on this machine. The WDDM sync tax (~20ms) caps
-        the loop at ~45fps, which is the honest cost of reliability here —
-        measured safe in the 8s GL/CUDA controls, where the zero-sync async
-        variant eventually stalls."""
+        Per-frame sync is the rock-solid pattern (never accumulates async
+        work). glFinish is deliberately NOT called: it costs ~5ms/frame and
+        is only needed before GL readbacks, not for presentation — the swap
+        completes the pipeline ordering."""
         b = self.buffers[self.idx]
         fractals._launch(kernel, b["out"], view)
         cp.cuda.get_current_stream().synchronize()
@@ -213,7 +211,6 @@ class Renderer:
         gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, 0)
         gl.glBindVertexArray(self._vao)
         gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
-        gl.glFinish()
         self.idx ^= 1
 
     def present_last(self):
@@ -447,6 +444,8 @@ def main() -> int:
     last_title = 0.0
     res_factor = 1.0          # internal render scale; drops when frames get heavy
     last_px = fb_w * fb_h
+    motion_wide = 768         # motion render width (full iters, LINEAR upscale)
+    last_motion_at = time.perf_counter()
     try:
         while not glfw.window_should_close(window):
             dt = min(time.perf_counter() - last_t, 0.1)
@@ -506,16 +505,31 @@ def main() -> int:
 
             state.refresh_adaptive()
 
-            # ---- render: always at FULL resolution + FULL iterations ----
-            # Measured: full quality costs only ~18ms more than a 400-iter
-            # cap (fp64: 63ms vs 45ms), and the cap caused black voids
-            # (boundary points that need more iterations rendered as
-            # interior). Full iters = no voids, no placeholders, no refine
-            # states. fps: fp64 ~16-22, fp32 ~23-28 — consistent and real.
+            # ---- render: full-iter, adaptive motion width, sharpens on idle ----
+            # The WDDM present path has a hard cost cliff vs render width
+            # (measured): 640px = 21ms, 768px = 23ms, 960px = 34ms, 1080p =
+            # 56ms @ full fp64 iterations. So during motion we render at
+            # motionWide (FULL iterations — no black voids, real math, LINEAR
+            # upscale = soft but never pixel-blocky). When the user stops
+            # >0.4s, one full-res pass sharpens it for the still frame.
             if dirty:
                 dirty = False
-                render_frame(w, h, state.view(w, h))
+                mw = min(w, motion_wide)
+                mh = max(2, round(h * (mw / w)))
+                v = state.view(mw, mh)
+                render_frame(mw, mh, v)
+                last_px = mw * mh
+                last_motion_at = time.perf_counter()
+            elif (
+                time.perf_counter() - last_motion_at > 0.4
+                and (renderer.w != w or renderer.h != h)
+            ):
+                # settle sharpen: one full-res frame (56ms @ 720p fp64 — at
+                # most a 2-3 frame hitch after motion stops, then crisp)
+                v = state.view(w, h)
+                render_frame(w, h, v)
                 last_px = w * h
+                last_motion_at = time.perf_counter()  # re-arm
             else:
                 renderer.present_last()  # keep vsync present while idle
 
@@ -527,16 +541,16 @@ def main() -> int:
             now = time.perf_counter()
             if now - last_title > 0.25:
                 last_title = now
-                # Adaptive resolution from a predicted kernel time (no CUDA
-                # syncs in the loop — any host sync costs ~20ms on WDDM).
-                # Predicted at FULL iters; only drops res when the kernel
-                # genuinely can't hold (~16fps floor), not during standard
-                # use where full-res full-iter costs 45-63ms.
+                # Adaptive resolution from a predicted kernel time (no host
+                # syncs beyond the per-frame one; any extra sync costs ~20ms
+                # on WDDM). Predict at the motion-capped width with FULL
+                # iterations: stays under budget (21-34ms measured), so
+                # res_factor holds 1.0 during normal zoom.
                 pred = predict_ms(state.precision, last_px, state.max_iter)
                 if pred > 50.0 and res_factor > 0.25:
                     res_factor = max(0.25, res_factor * 0.75)
                     dirty = True
-                elif pred < 20.0 and res_factor < 1.0:
+                elif pred < 16.0 and res_factor < 1.0:
                     res_factor = min(1.0, res_factor / 0.75)
                     dirty = True
                 loop_fps = 1.0 / max(time.perf_counter() - last_t, 1e-6)

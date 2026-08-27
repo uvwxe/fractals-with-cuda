@@ -126,6 +126,8 @@ def main():
     sim_last_input = time.perf_counter()
     refine_stage = 0
     REFINE_STAGES = 3
+    self_motion_wide = 768
+    last_motion = time.perf_counter()
 
     def decide_res():
         nonlocal res_factor, dirty, last_px
@@ -209,12 +211,21 @@ def main():
 
             if dirty:
                 dirty = False
-                # FULL resolution + FULL iterations (measured: costs only
-                # ~18ms over a shallow cap and never leaves black voids)
+                # motion: full iterations at motion width (LINEAR upscale)
+                mw = min(W, self_motion_wide)
+                mh = max(2, round(H * (mw / W)))
+                v = sim.state.view(mw, mh)
+                renderer.render_and_present(fractals._get_kernel(bool(sim.state.precision)), v)
+                last_px = mw * mh
+                dirty_count += 1
+                last_motion = time.perf_counter()
+            elif time.perf_counter() - last_motion > 0.4 and (renderer.w != W or renderer.h != H):
+                # settle sharpen: one full-res frame
                 v = sim.state.view(W, H)
                 renderer.render_and_present(fractals._get_kernel(bool(sim.state.precision)), v)
                 last_px = W * H
                 dirty_count += 1
+                last_motion = time.perf_counter()
             else:
                 renderer.present_last()
             glfw.swap_buffers(win)
