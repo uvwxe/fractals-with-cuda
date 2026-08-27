@@ -22,7 +22,7 @@ import cupy as cp
 from native.interop import CudaGLError, GlCudaBuffer, prefer_discrete_gpu, sys_executable
 from server import fractals
 
-MIN_SCALE = 1e-14
+MIN_SCALE = 1e-8
 MAX_SCALE = 10.0
 FULL_SET = {"centerRe": -0.6, "centerIm": 0.0, "scale": 3.4}
 
@@ -177,9 +177,13 @@ class Renderer:
         # Drain the pipeline BEFORE touching GL/CUDA resources: if frames
         # referencing the current PBO/texture are still in flight, unmapping
         # or deleting them can hang forever on WDDM. alloc is rare (resize /
-        # adaptive-res step), so one serialization here is fine.
+        # adaptive-res step), so a bounded wait is fine — never a bare
+        # blocking sync, which can wedge.
         try:
-            cp.cuda.get_current_stream().synchronize()
+            stream = cp.cuda.get_current_stream()
+            deadline = time.perf_counter() + 1.0
+            while not stream.done() and time.perf_counter() < deadline:
+                time.sleep(0.002)
             gl.glFinish()
         except Exception:
             pass
@@ -189,18 +193,18 @@ class Renderer:
             self.nbytes = self._alloc_one(b, w, h)
 
     def render_and_present(self, kernel, view: dict):
-        """CUDA kernel writes the mapped buffer; GL copies it to the texture
-        and draws. Fully async: NO host-side CUDA sync per frame.
+        """CUDA kernel writes the mapped buffer; wait for it (always); GL
+        copies it to the texture and draws.
 
-        Measured on this machine (WDDM): any per-frame host sync on the
-        interop path costs ~20ms (forced command-buffer flush + round trip),
-        capping the loop at ~46fps. Unsynced submission is ~0.2ms/frame and
-        the interop driver still orders kernel->texsub via its scheduler
-        tokens, so the display shows correct frames paced by the compositor.
-        The texsub of frame N reads kernel N through that token, not through
-        a host wait."""
+        Per-frame sync is the classic, rock-solid CUDA-GL pattern: it never
+        accumulates async work, so it can't hit the driver states that hang
+        long async sessions on this machine. The WDDM sync tax (~20ms) caps
+        the loop at ~45fps, which is the honest cost of reliability here —
+        measured safe in the 8s GL/CUDA controls, where the zero-sync async
+        variant eventually stalls."""
         b = self.buffers[self.idx]
         fractals._launch(kernel, b["out"], view)
+        cp.cuda.get_current_stream().synchronize()
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, b["tex"])
         gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, b["pbo"])
@@ -209,6 +213,7 @@ class Renderer:
         gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, 0)
         gl.glBindVertexArray(self._vao)
         gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
+        gl.glFinish()
         self.idx ^= 1
 
     def present_last(self):
@@ -412,7 +417,6 @@ def main() -> int:
     # ---- main loop ----
     last_t = time.perf_counter()
     last_title = 0.0
-    last_drain = 0.0
     res_factor = 1.0          # internal render scale; drops when frames get heavy
     last_px = fb_w * fb_h
     try:
@@ -425,15 +429,20 @@ def main() -> int:
             if w == 0 or h == 0:
                 continue
 
-            # wheel -> zoom velocity (impulse), applied as a continuous glide
+            # wheel -> zoom velocity (impulse), applied as a continuous glide.
+            # Clamp both the impulse (trackpads burst many events per poll) and
+            # the per-frame step so a fast scroll never dives straight to the
+            # zoom floor (which renders as a black wall past fp64's limit).
             if scroll_queue:
-                for y in scroll_queue:
-                    zoom_vel += 2.4 * y
+                impulse = 2.4 * sum(y for y in scroll_queue)
+                impulse = max(-6.0, min(6.0, impulse))
+                zoom_vel = max(-8.0, min(8.0, zoom_vel + impulse))
                 scroll_queue.clear()
             if abs(zoom_vel) > 1e-3:
                 px, py = cursor_pos()
                 cre, cim = cursor_complex(px, py, w, h)
-                new_scale = min(MAX_SCALE, max(MIN_SCALE, state.scale * math.exp(-zoom_vel * dt)))
+                step = math.exp(max(-0.35, min(0.35, -zoom_vel * dt)))
+                new_scale = min(MAX_SCALE, max(MIN_SCALE, state.scale * step))
                 if new_scale != state.scale:
                     k = new_scale / state.scale
                     state.centerRe = cre - (cre - state.centerRe) * k
@@ -481,18 +490,6 @@ def main() -> int:
             elapsed = time.perf_counter() - last_t
             if elapsed < 0.016:
                 time.sleep(0.016 - elapsed)
-
-            # Periodic pipeline drain (1Hz, ~20ms — 2% overhead). Without ANY
-            # host sync, the WDDM interop queue wedges after ~2s of async
-            # frames: the next sync hangs forever. This retires it regularly.
-            # (Measured: 1.0s interval is safe; 1.5s wedges.)
-            if time.perf_counter() - last_drain > 1.0:
-                last_drain = time.perf_counter()
-                try:
-                    cp.cuda.get_current_stream().synchronize()
-                    gl.glFinish()
-                except Exception:
-                    pass
 
             now = time.perf_counter()
             if now - last_title > 0.25:

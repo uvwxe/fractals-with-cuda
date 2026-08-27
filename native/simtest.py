@@ -64,13 +64,15 @@ class Sim:
         """One loop iteration (same math as main()). Returns dirty."""
         dirty = dirty_was
         if self.scroll_queue:
-            for y in self.scroll_queue:
-                self.zoom_vel += 2.4 * y
+            impulse = 2.4 * sum(y for y in self.scroll_queue)
+            impulse = max(-6.0, min(6.0, impulse))
+            self.zoom_vel = max(-8.0, min(8.0, self.zoom_vel + impulse))
             self.scroll_queue.clear()
         if abs(self.zoom_vel) > 1e-3:
             px, py = self.cursor_pos()
             cre, cim = self.cursor_complex(px, py)
-            new_scale = min(MAX_SCALE, max(MIN_SCALE, self.state.scale * math.exp(-self.zoom_vel * dt)))
+            step = math.exp(max(-0.35, min(0.35, -self.zoom_vel * dt)))
+            new_scale = min(MAX_SCALE, max(MIN_SCALE, self.state.scale * step))
             if new_scale != self.state.scale:
                 k = new_scale / self.state.scale
                 self.state.centerRe = cre - (cre - self.state.centerRe) * k
@@ -146,6 +148,7 @@ def main():
         ("zoom-x60", 2.6),
         ("drag", 1.2),
         ("deep-fp64", 2.8),
+        ("long-zoom", 20.0),
     ]
     t0_real = time.perf_counter()
     elapsed_real = 0.0
@@ -154,6 +157,7 @@ def main():
     phase_name = phases[0][0]
     phase_dur = phases[0][1]
     wheel_ticks = 0
+    long_ticks = 0
 
     try:
         started = False
@@ -172,26 +176,19 @@ def main():
             if phase_name == "drag" and sim.drag_prev is None:
                 print("phase: drag", flush=True)
             if phase_name == "deep-fp64" and phase_elapsed == 0.0:
-                print("phase: deep-fp64 (checking stream after jump)", flush=True)
-                # bounded probe: is the stream already wedged right after jump?
-                import threading
-                done = threading.Event()
-                q = {}
-                def probe():
-                    try:
-                        cp.cuda.get_current_stream().synchronize()
-                        q["ok"] = True
-                    except Exception as e:
-                        q["err"] = e
-                    done.set()
-                th = threading.Thread(target=probe, daemon=True); th.start()
-                done.wait(6.0)
-                print(f"  stream after jump: {'OK' if q.get('ok') else 'WEDGED'}", flush=True)
+                print("phase: deep-fp64", flush=True)
+            if phase_name == "long-zoom" and phase_elapsed == 0.0:
+                print("phase: long-zoom (continuous wheel 20s)", flush=True)
 
             if phase_name == "zoom-x60" and wheel_ticks < 60:
                 if wheel_ticks % 3 == 0:
                     sim.on_scroll(None, 0, 1)
                 wheel_ticks += 1
+            if phase_name == "long-zoom":
+                # continuous wheel: ~30 events/s for the whole 20s phase
+                long_ticks += 1
+                if long_ticks % 2 == 0:
+                    sim.on_scroll(None, 0, 1)
             if phase_name == "drag" and sim.drag_prev is None:
                 sim.on_button(None, glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
             if phase_name == "drag":
@@ -241,13 +238,9 @@ def main():
             if dt > 0.03:
                 hitches.append((round(elapsed_real, 2), round(dt * 1000, 1), phase_name))
 
-            # MAIN-THREAD periodic drain (blocking, not watchdogged): the
-            # WDDM interop queue wedges after ~2s of never-synced frames;
-            # this retires it. Sync cost ~20ms on this machine.
-            if phase_name != "deep-fp64" and now_r - last_dog_purge > DRY_INTERVAL:
-                last_dog_purge = now_r
-                cp.cuda.get_current_stream().synchronize()
-                gl.glFinish()
+            # Pipeline retirement is now per-frame inside render_and_present
+            # (sync + glFinish each frame — the rock-solid pattern): no
+            # periodic drain needed.
 
             phase_elapsed += dt
             if phase_elapsed >= phase_dur:
@@ -266,47 +259,23 @@ def main():
                         sim.state.refresh_adaptive()
                         dirty = True
 
-        # ---- final correctness: subprocess verification ----
-        # Re-verifying in a second context in-process poisons the driver
-        # (glfw re-init after terminate leaves CUDA-GL state wedged), so the
-        # fresh check runs in a clean subprocess.
+        # ---- final correctness: main-thread verification ----
+        # NO watchdog threads ever: GL/CUDA calls require the owning thread.
         final_view = dict(sim.state.view(W, H))
         import json
 
-        def watchdog_sync(timeout=8.0):
-            import threading
-            done = threading.Event()
-            out = {}
-            def work():
-                try:
-                    cp.cuda.get_current_stream().synchronize()
-                    out["ok"] = True
-                except Exception as e:
-                    out["err"] = e
-                finally:
-                    done.set()
-            t = threading.Thread(target=work, daemon=True)
-            t.start()
-            done.wait(timeout)
-            return out.get("ok", False)
-
-        print("final-verify: sim-context wedged-stream check (watchdog)", flush=True)
-        stream_ok = watchdog_sync()
+        print("final-verify: main-thread sync", flush=True)
+        cp.cuda.get_current_stream().synchronize()
+        gl.glFinish()
+        stream_ok = True
 
         w, h = W, H
         renderer.close()
         glfw.destroy_window(win)
         glfw.terminate()
 
-        if not stream_ok:
-            print("final-verify: sim context WEDGED despite 1s drains", flush=True)
-            print("SIMTEST FAIL (wedged)", flush=True)
-            return 1
-
         print("final-verify: subprocess pixel check...", flush=True)
-        payload = json.dumps({
-            "view": final_view,
-        })
+        payload = json.dumps({"view": final_view})
         sub = subprocess.Popen([sys.executable, "-m", "native.verifyframe", payload],
                                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         rc = sub.wait(timeout=60)
