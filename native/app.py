@@ -10,7 +10,9 @@ Keys: drag = pan · wheel = zoom · right-click = Julia seed · M = Mandelbrot/J
       F = fp32/fp64 (pins) · S = 2x2 supersample · 1-4 = palette
       Up/Down = iterations (pins) · R = reset · Esc = quit
 """
+import json
 import math
+import os
 import sys
 import time
 
@@ -321,6 +323,44 @@ def main() -> int:
         nonlocal last_input_t
         last_input_t = time.perf_counter()
 
+    bookmarks: list[dict | None] = [None] * 10
+    pending_bookmark: str | None = None
+    STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state.json")
+
+    def save_state():
+        try:
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump({
+                    "centerRe": state.centerRe, "centerIm": state.centerIm,
+                    "scale": state.scale, "mode": state.mode,
+                    "palette": state.palette, "maxIter": state.max_iter,
+                    "bookmarks": [b for b in bookmarks if b],
+                }, f)
+        except Exception as e:
+            print(f"state save failed: {e}", flush=True)
+
+    def restore_state():
+        nonlocal bookmarks
+        try:
+            if os.path.exists(STATE_FILE):
+                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                state.centerRe = float(d.get("centerRe", state.centerRe))
+                state.centerIm = float(d.get("centerIm", state.centerIm))
+                state.scale = float(d.get("scale", state.scale))
+                state.mode = int(d.get("mode", state.mode))
+                state.palette = int(d.get("palette", state.palette))
+                state.max_iter = int(d.get("maxIter", state.max_iter))
+                for i, b in enumerate(d.get("bookmarks", [])[:10]):
+                    if b:
+                        bookmarks[i] = b
+                print(f"restored state: ×{format_mag(FULL_SET['scale']/state.scale)}", flush=True)
+        except Exception as e:
+            print(f"state restore failed: {e}", flush=True)
+
+    restore_state()
+    state.refresh_adaptive()
+
     def cursor_pos():
         return glfw.get_cursor_pos(window)
 
@@ -373,12 +413,27 @@ def main() -> int:
     }
 
     def on_key(_win, key, _scancode, action, _mods):
-        nonlocal anim, dirty
+        nonlocal anim, dirty, pending_bookmark
         if action != glfw.PRESS:
             return
         mark_input()
         if key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(window, True)
+        elif key == glfw.KEY_P:
+            # screenshot: capture the CURRENT framebuffer to shots/<ts>.png
+            try:
+                w, h = framebuffer()
+                gl.glFinish()
+                px = gl.glReadPixels(0, 0, w, h, gl.GL_RGB, gl.GL_UNSIGNED_BYTE)
+                import numpy as _np
+                from PIL import Image as _Image
+                arr = _np.frombuffer(px, dtype=_np.uint8).reshape(h, w, 3)[::-1]
+                os.makedirs("shots", exist_ok=True)
+                fname = f"shots/fractal_{time.strftime('%Y%m%d_%H%M%S')}.png"
+                _Image.fromarray(arr).save(fname)
+                print(f"saved screenshot: {fname}", flush=True)
+            except Exception as e:
+                print(f"screenshot failed: {e}", flush=True)
         elif key in PRESETS:
             name, cre, cim, scale = PRESETS[key]
             state.precision_pin = None
@@ -418,6 +473,36 @@ def main() -> int:
             state.iter_pin = max(64, int(state.max_iter / 1.5))
             state.max_iter = state.iter_pin
             dirty = True
+        elif key == glfw.KEY_B:
+            # bookmark save: B then 0-9
+            pending_bookmark = "save"
+        elif key == glfw.KEY_G:
+            pending_bookmark = "go"
+        elif pending_bookmark and glfw.KEY_0 <= key <= glfw.KEY_9:
+            slot = key - glfw.KEY_0
+            if pending_bookmark == "save":
+                bookmarks[slot] = {
+                    "centerRe": state.centerRe, "centerIm": state.centerIm,
+                    "scale": state.scale, "mode": state.mode,
+                    "palette": state.palette, "maxIter": state.max_iter,
+                }
+                print(f"bookmark {slot} saved: ×{format_mag(FULL_SET['scale']/state.scale)}", flush=True)
+            else:
+                b = bookmarks[slot] if slot < len(bookmarks) else None
+                if b:
+                    state.precision_pin = None
+                    state.iter_pin = None
+                    state.mode = b["mode"]
+                    state.palette = b["palette"]
+                    anim = {"t0": time.perf_counter(), "dur": 1.1,
+                            "from": {"centerRe": state.centerRe, "centerIm": state.centerIm,
+                                     "scale": state.scale},
+                            "to": {"centerRe": b["centerRe"], "centerIm": b["centerIm"],
+                                   "scale": b["scale"]}}
+                    print(f"fly to bookmark {slot}", flush=True)
+                else:
+                    print(f"bookmark {slot} empty", flush=True)
+            pending_bookmark = None
 
     glfw.set_scroll_callback(window, on_scroll)
     glfw.set_mouse_button_callback(window, on_button)
@@ -603,11 +688,12 @@ def main() -> int:
                     f"×{format_mag(mag)} · {'fp64' if state.precision else 'fp32'} · "
                     f"iter {state.max_iter} · gpu ~{pred:.1f} ms · "
                     f"res {int(res_factor * 100)}% · ~{min(fps_ema, 62):.0f} fps · "
-                    f"5-9 presets | zoom at the EDGE not the black"
+                    f"5-9 presets | B/G+0-9 bookmarks | P shot"
                     f"{limit_hint}"))
 
             glfw.swap_buffers(window)
     finally:
+        save_state()
         renderer.close()
         glfw.destroy_window(window)
         glfw.terminate()
