@@ -12,11 +12,22 @@ Real-time Mandelbrot & Julia explorer rendering **every pixel with raw CUDA kern
 
 ## Two ways to run
 
+> **First: get inside the project folder.** Every command below must run from
+> the repo directory — `uv pip install -e .` and `python -m native.app` only
+> work there (that's where `pyproject.toml` and the `native/` package live).
+>
+> If you don't have the repo yet:
+> ```powershell
+> git clone https://github.com/uvwxe/fractals-with-cuda.git
+> cd fractals-with-cuda
+> ```
+
 ### Native app (recommended — faster, no browser)
 
 The CUDA kernel writes **straight into a GPU-mapped OpenGL buffer** — the frame never touches the CPU, so zoom is ~45fps at full resolution, pixel-perfect, on vsync.
 
 ```powershell
+cd C:\path\to\fractals-with-cuda   # or just: cd fractals-with-cuda
 uv venv --python 3.12 .venv
 uv pip install -e .
 .venv\Scripts\python.exe -m native.app
@@ -25,6 +36,7 @@ uv pip install -e .
 ### Web version
 
 ```powershell
+cd C:\path\to\fractals-with-cuda
 uv pip install -e .
 .venv\Scripts\python.exe -m uvicorn server.main:app --host 127.0.0.1 --port 8000
 ```
@@ -49,9 +61,12 @@ Open http://127.0.0.1:8000
 | Mandelbrot / Julia | `M` |
 | Palettes | `1`–`4` |
 | fp32 / fp64 | `F` |
-| Supersampling | `S` | | Iterations | `Up` / `Down` |
+| Supersampling | `S` |
+| Iterations | `Up` / `Down` |
 | Reset fly-in | `R` |
-| Presets (boundary hotspots) | `5`–`9` |
+| Presets (boundary hotspots) | `5`–`9`, `0` = Seahorse Abyss |
+| Bookmark view / go to bookmark | `B` then `0`–`9` / `G` then `0`–`9` |
+| Save PNG screenshot | `P` (writes to `shots/`) |
 | Quit | `Esc` |
 
 ## Presets
@@ -81,6 +96,8 @@ double-double GPU arithmetic — genuinely a different project.
 
 ## Test suite
 
+Run from the project folder (same `cd` rule as above):
+
 ```powershell
 # native pipeline: renders through the real GL interop path, pixel-exact check
 .venv\Scripts\python.exe -m native.app --selftest
@@ -88,7 +105,7 @@ double-double GPU arithmetic — genuinely a different project.
 # interactive simulation: scripted zoom/drag/deep sessions, reports fps/hitches/pixels
 .venv\Scripts\python.exe -m native.simtest
 
-# screenshot generator
+# screenshot generator (Seahorse Valley + Deep)
 .venv\Scripts\python.exe scripts\screenshot.py
 ```
 
