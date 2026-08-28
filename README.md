@@ -10,37 +10,68 @@ Real-time Mandelbrot & Julia explorer rendering **every pixel with raw CUDA kern
 |---|---|---|
 | ![hero](docs_hero.png) | ![deep](docs_deep.png) | ![abyss](docs_abyss.png) |
 
-## Two ways to run
+## Installation
 
-> **First: get inside the project folder.** Every command below must run from
-> the repo directory — `uv pip install -e .` and `python -m native.app` only
-> work there (that's where `pyproject.toml` and the `native/` package live).
->
-> If you don't have the repo yet:
-> ```powershell
-> git clone https://github.com/uvwxe/fractals-with-cuda.git
-> cd fractals-with-cuda
-> ```
+### Prerequisites
 
-### Native app (recommended — faster, no browser)
+- **An NVIDIA GPU with CUDA support** (any GeForce/Quadro/RTX — the app auto-detects your card's capability and tunes itself). No CUDA Toolkit install needed — the CUDA runtime and JIT compiler ship inside the Python package.
+- **Python 3.12** — the app manages its own venv, but needs a base interpreter.
+- **uv** (fast Python package manager):
 
-The CUDA kernel writes **straight into a GPU-mapped OpenGL buffer** — the frame never touches the CPU, so zoom is ~45fps at full resolution, pixel-perfect, on vsync.
+  ```powershell
+  # Windows (PowerShell)
+  winget install astral-sh.uv
+  # or
+  pip install uv
+
+  # macOS / Linux
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+
+### 1. Get the code
 
 ```powershell
-cd C:\path\to\fractals-with-cuda   # or just: cd fractals-with-cuda
+git clone https://github.com/uvwxe/fractals-with-cuda.git
+cd fractals-with-cuda
+```
+
+(No git? Download the ZIP from the green "Code" button on GitHub, extract it, and `cd` into the extracted folder.)
+
+### 2. Install
+
+```powershell
 uv venv --python 3.12 .venv
 uv pip install -e .
+```
+
+This creates `.venv` inside the project and installs everything — CuPy (which bundles CUDA 12.x), PyOpenGL, GLFW, FastAPI, websockets. First install downloads ~300 MB of CUDA wheels, so it takes a few minutes.
+
+### 3. Run
+
+**Native desktop app (recommended — faster, no browser):**
+
+```powershell
 .venv\Scripts\python.exe -m native.app
 ```
 
-### Web version
+**Web version (in a browser):**
 
 ```powershell
-cd C:\path\to\fractals-with-cuda
-uv pip install -e .
 .venv\Scripts\python.exe -m uvicorn server.main:app --host 127.0.0.1 --port 8000
 ```
 Open http://127.0.0.1:8000
+
+> ⚠ **First launch**: the CUDA kernels are JIT-compiled on startup (NVRTC) — the first window takes ~10-20s to appear while it compiles. After that it's instant.
+>
+> If you get a black window or it exits instantly, your GL context may have landed on the integrated GPU — the app will print instructions to fix it (set `GpuPreference=2` for `python.exe` and re-run).
+
+### Updating
+
+```powershell
+cd fractals-with-cuda
+git pull
+uv pip install -e .
+```
 
 ## What it does
 
