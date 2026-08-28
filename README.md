@@ -6,9 +6,9 @@ Real-time Mandelbrot & Julia explorer rendering **every pixel with raw CUDA kern
 
 ## Screenshots
 
-| Seahorse Valley | Seahorse Deep (fp64, ×17,000) |
-|---|---|
-| ![hero](docs_hero.png) | ![deep](docs_deep.png) |
+| Seahorse Valley | Seahorse Deep (fp64, ×17,000) | Seahorse Abyss (fp64, ×34 billion) |
+|---|---|---|
+| ![hero](docs_hero.png) | ![deep](docs_deep.png) | ![abyss](docs_abyss.png) |
 
 ## Two ways to run
 
