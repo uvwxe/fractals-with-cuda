@@ -58,9 +58,17 @@ _PROBE_PX = 256 * 256
 _PROBE_ITERS = 256
 
 
-def predict_ms(precision: int, pixels: int, iters: int) -> float:
-    probe = _PROBE["fp32" if precision == 0 else "fp64"]
-    return probe * (max(pixels, 1) / _PROBE_PX) * (max(iters, 1) / _PROBE_ITERS)
+def predict_ms(precision: int, pixels: int, iters: int, width: int = 0) -> float:
+    # Two-part model: a fixed WDDM present floor that scales with render
+    # width (measured: ~16ms @640px, ~21ms @1280px) plus the pure kernel
+    # time (per-px-iter, calibrated from the real loop measurements:
+    # fp64 4000it@720p total 55.7ms - 21ms floor => 9.2e-9 ms/px/iter.
+    # The old pure-linear model ignored the floor and over-estimated
+    # deep fp64 by ~3x, which made adaptive-res crater to 25%.
+    import math as _m
+    floor = (13.0 + width * 0.0068) if width else 0.0
+    kpi = 2.08e-9 if precision == 0 else 9.2e-9
+    return floor + kpi * (max(pixels, 1)) * (max(iters, 1))
 
 
 # ---- Capability scaling ----------------------------------------------------
@@ -571,7 +579,6 @@ def main() -> int:
     # ---- main loop ----
     last_t = time.perf_counter()
     last_title = 0.0
-    res_factor = 1.0          # internal render scale; drops when frames get heavy
     last_px = fb_w * fb_h
     motion_wide = CAP["motion_wide"]  # motion render width (full iters, LINEAR upscale)
     last_motion_at = time.perf_counter()
@@ -670,18 +677,12 @@ def main() -> int:
             now = time.perf_counter()
             if now - last_title > 0.25:
                 last_title = now
-                # Adaptive resolution from a predicted kernel time (no host
-                # syncs beyond the per-frame one; any extra sync costs ~20ms
-                # on WDDM). Predict at the motion-capped width with FULL
-                # iterations: stays under budget (21-34ms measured), so
-                # res_factor holds 1.0 during normal zoom.
-                pred = predict_ms(state.precision, last_px, state.max_iter)
-                if pred > 50.0 and res_factor > 0.25:
-                    res_factor = max(0.25, res_factor * 0.75)
-                    dirty = True
-                elif pred < 16.0 and res_factor < 1.0:
-                    res_factor = min(1.0, res_factor / 0.75)
-                    dirty = True
+                # Cost model for the HUD only (WDDM present floor + kernel).
+                # Adaptive resolution is handled by motion_wide — render
+                # size never changes dynamically, so nothing can go blocky.
+                mw = min(w, motion_wide)
+                mh = max(2, round(h * (mw / w)))
+                pred = predict_ms(state.precision, mw * mh, state.max_iter, mw)
                 loop_fps = 1.0 / max(time.perf_counter() - last_t, 1e-6)
                 fps_ema = fps_ema * 0.7 + min(loop_fps, 62) * 0.3
                 mag = FULL_SET["scale"] / state.scale
@@ -691,7 +692,6 @@ def main() -> int:
                     f"fractals — {'Julia' if state.mode else 'Mandelbrot'} · "
                     f"×{format_mag(mag)} · {prec_name} · "
                     f"iter {state.max_iter} · gpu ~{pred:.1f} ms · "
-                    f"res {int(res_factor * 100)}% · ~{min(fps_ema, 62):.0f} fps · "
                     f"5-9 presets | B/G+0-9 bookmarks | P shot"
                     f"{limit_hint}"))
 

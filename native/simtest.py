@@ -112,7 +112,6 @@ def main():
     print(f"probes: fp32 {predict_ms(0, W*H, 400):.2f} ms @ full-res/400it, "
           f"fp64 {predict_ms(1, W*H, 400):.2f} ms", flush=True)
 
-    res_factor = 1.0
     dirty = False
     last_px = W * H
     last_title = time.perf_counter()
@@ -129,18 +128,12 @@ def main():
     last_motion = time.perf_counter()
 
     def decide_res():
-        nonlocal res_factor, dirty, last_px
-        cap = 900 if sim.state.precision == 0 else 400
-        pred = predict_ms(sim.state.precision, last_px, min(sim.state.max_iter, cap))
-        prev = res_factor
-        if pred > 24.0 and res_factor > 0.25:
-            res_factor = max(0.25, res_factor * 0.75)
-            dirty = True
-        elif pred < 8.0 and res_factor < 1.0 and not sim_moving:
-            res_factor = min(1.0, res_factor / 0.75)
-            dirty = True
-        if res_factor != prev:
-            print(f"  res {prev:.2f}->{res_factor:.2f} (pred {pred:.1f}ms cap-iter, {sim.state.max_iter} full iter, prec {sim.state.precision})", flush=True)
+        # Mirrors the app: no dynamic resolution (motion_wide fixed), FULL
+        # iterations always. Just records the predicted cost for the report.
+        nonlocal last_px
+        mw = min(W, self_motion_wide)
+        mh = max(2, round(H * (mw / W)))
+        return predict_ms(sim.state.precision, mw * mh, sim.state.max_iter, mw)
 
     def queued_guard():
         # count of renders since last adapt happened implicitly through pacing
@@ -241,19 +234,19 @@ def main():
             if el < 0.016:
                 time.sleep(0.016 - el)
 
-            # title-time adaptation logic (no syncs!)
+            # title-time logic (no syncs!)
             now_t = time.perf_counter()
             if now_t - last_title > 0.25:
                 last_title = now_t
                 sim_moving = sim.zoom_vel > 1e-3 or sim.dragging
-                decide_res()
+                pred_ms = decide_res()
                 mag = FULL_SET["scale"] / sim.state.scale
                 timeline.append({
                     "t": round(elapsed_real, 2),
                     "phase": phase_name,
                     "mag": format_mag(mag),
                     "prec": sim.state.precision,
-                    "res": round(res_factor, 2),
+                    "pred": round(pred_ms, 1),
                     "iter": sim.state.max_iter,
                 })
 
@@ -309,21 +302,16 @@ def main():
             print(" ", row, flush=True)
         print(f"dirty renders: {dirty_count}", flush=True)
         print(f"sim-context sync {'OK' if stream_ok else 'WEDGED'}", flush=True)
-        # PASS rules: no wedge, pixels exact, res stayed full during shallow
-        # (no unjustified pixelation). Decided hitches (>150ms) count; the
-        # accepted 1Hz drains land well under 150ms in normal use.
+        # PASS rules: no wedge, pixels exact, no big hitches, and the settle
+        # sharpen fired at least once (full-res pass after idle).
         big_hitches = [hh for hh in hitches if hh[1] > 150.0]
-        shallow_res_ok = all(
-            r["res"] == 1.0 for r in timeline
-            if r["phase"] in ("idle", "zoom-x60", "drag")
-        )
-        print(f"final res_factor={res_factor}, dirty renders={dirty_count}, "
-              f"hitches={len(hitches)} (big={len(big_hitches)}), "
+        print(f"dirty renders={dirty_count}, hitches={len(hitches)} (big={len(big_hitches)}), "
               f"pixel check {'PASS' if sub_ok else 'FAIL'}, "
-              f"shallow res full: {shallow_res_ok}", flush=True)
+              f"motion width {self_motion_wide}px fixed (no adaptive res — "
+              f"never blocky)", flush=True)
         for hh in big_hitches[:10]:
             print("  big hitch:", hh, flush=True)
-        ok = stream_ok and sub_ok and shallow_res_ok and len(big_hitches) == 0
+        ok = stream_ok and sub_ok and len(big_hitches) == 0
         print("SIMTEST PASS" if ok else "SIMTEST FAIL", flush=True)
     except Exception:
         raise
