@@ -56,11 +56,18 @@ Open http://127.0.0.1:8000
 
 ## Presets
 
-`5` Seahorse Valley · `6` Elephant Valley · `7` Triple Spiral · `8` Satellite Minibrot · `9` Seahorse Deep (fp64) — plus the web version has 14 verified presets.
+`5` Seahorse Valley · `6` Elephant Valley · `7` Triple Spiral · `8` Satellite Minibrot · `9` Seahorse Deep (fp64) · `0` **Seahorse Abyss (×34 billion)** — plus the web version has 14 verified presets.
 
 ## How deep can it go?
 
-Double precision (fp64) is the hard ceiling: ~**×170 million** magnification, where the precision wall turns the boundary into a solid field. The app clamps there and tells you in the title bar. Going past that requires double-double GPU arithmetic (a planned follow-up) or CPU arbitrary-precision.
+The fp64 kernel renders genuine fractal structure down to **scale 1e-14 — about ×340 TRILLION
+magnification** (verified: 460+ distinct colors at 1e-9, 1e-11 and 1e-13 at the Seahorse Deep
+boundary point). An earlier claim that double precision "collapses at 1e-8" was a measurement
+artifact — testing at a uniform-coordinate spot, not a real boundary.
+
+The app's zoom floor is 1e-14; the `0` key flies to "Seahorse Abyss" (scale 1e-10), and `9`
+to "Seahorse Deep" (2e-4). Beyond 1e-14 you'd need arbitrary-precision CPU math or
+double-double GPU arithmetic — genuinely a different project.
 
 ## Benchmarks (RTX 3050 Laptop, 4 GB)
 

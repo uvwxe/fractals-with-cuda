@@ -411,7 +411,8 @@ def main() -> int:
         glfw.KEY_6: ("Elephant Valley", 0.2825, 0.005, 0.045),
         glfw.KEY_7: ("Triple Spiral", -0.088, 0.654, 0.04),
         glfw.KEY_8: ("Satellite Minibrot", -1.768, 0.0009, 0.07),
-        glfw.KEY_9: ("Seahorse Deep", -0.743643887037151, 0.13182590420533, 0.0002),
+        glfw.KEY_9: ("Seahorse Deep", -0.743643887037151, 0.13182590420533, 2e-4),
+        glfw.KEY_0: ("Seahorse Abyss", -0.743643887037151, 0.13182590420533, 1e-10),
     }
 
     def on_key(_win, key, _scancode, action, _mods):
