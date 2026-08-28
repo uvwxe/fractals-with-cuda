@@ -69,7 +69,9 @@ def predict_ms(precision: int, pixels: int, iters: int) -> float:
 # over-promises. Probe the actual device and derive constants from what it
 # can genuinely do. run_probe() populates CAP for the lifetime of the app.
 CAP = {
-    "min_scale": 2e-8,     # fp64 precision wall (default from this machine)
+    "min_scale": 1e-14,    # measured: fp64 renders detail to 1e-14 at real
+                           # boundary coords (the old 2e-8 'precision wall'
+                           # was an artifact of testing at a uniform spot)
     "motion_wide": 768,    # motion render width (present-path cliff)
     "iter_ceiling_fp64": 6000,
     "iter_ceiling_fp32": 12000,
@@ -682,10 +684,11 @@ def main() -> int:
                 loop_fps = 1.0 / max(time.perf_counter() - last_t, 1e-6)
                 fps_ema = fps_ema * 0.7 + min(loop_fps, 62) * 0.3
                 mag = FULL_SET["scale"] / state.scale
+                prec_name = 'fp64' if state.precision else 'fp32'
                 limit_hint = " ⚠ DOUBLE PRECISION LIMIT — can't go deeper" if state.scale <= min_scale() * 1.01 else ""
                 glfw.set_window_title(window, (
                     f"fractals — {'Julia' if state.mode else 'Mandelbrot'} · "
-                    f"×{format_mag(mag)} · {'fp64' if state.precision else 'fp32'} · "
+                    f"×{format_mag(mag)} · {prec_name} · "
                     f"iter {state.max_iter} · gpu ~{pred:.1f} ms · "
                     f"res {int(res_factor * 100)}% · ~{min(fps_ema, 62):.0f} fps · "
                     f"5-9 presets | B/G+0-9 bookmarks | P shot"
