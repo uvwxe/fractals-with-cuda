@@ -19,8 +19,8 @@ from OpenGL import GL as gl
 
 import cupy as cp
 
-from native.app import (AppState, Renderer, FULL_SET, MIN_SCALE, MAX_SCALE,
-                        auto_iter, calibrate_probes, predict_ms, format_mag)
+from native.app import (AppState, Renderer, FULL_SET, min_scale, MAX_SCALE,
+                        auto_iter, predict_ms, format_mag)
 from native.interop import GlCudaBuffer
 from server import fractals
 
@@ -72,7 +72,7 @@ class Sim:
             px, py = self.cursor_pos()
             cre, cim = self.cursor_complex(px, py)
             step = math.exp(max(-0.35, min(0.35, -self.zoom_vel * dt)))
-            new_scale = min(MAX_SCALE, max(MIN_SCALE, self.state.scale * step))
+            new_scale = min(MAX_SCALE, max(min_scale(), self.state.scale * step))
             if new_scale != self.state.scale:
                 k = new_scale / self.state.scale
                 self.state.centerRe = cre - (cre - self.state.centerRe) * k
@@ -107,7 +107,6 @@ def make_gl():
 def main():
     win = make_gl()
     fractals.warmup()
-    calibrate_probes()
     renderer = Renderer(W, H)
     sim = Sim()
     print(f"probes: fp32 {predict_ms(0, W*H, 400):.2f} ms @ full-res/400it, "
@@ -187,7 +186,7 @@ def main():
             if phase_name == "long-zoom" and phase_elapsed == 0.0:
                 print("phase: long-zoom (continuous wheel 20s)", flush=True)
             if phase_name == "zoom-to-limit" and phase_elapsed == 0.0:
-                print("phase: zoom-to-limit (wheel held; must reach MIN_SCALE)", flush=True)
+                print("phase: zoom-to-limit (wheel held; must reach min_scale)", flush=True)
 
             if phase_name == "zoom-x60" and wheel_ticks < 60:
                 if wheel_ticks % 3 == 0:

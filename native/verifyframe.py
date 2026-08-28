@@ -13,7 +13,7 @@ from OpenGL import GL as gl
 
 import cupy as cp
 
-from native.app import Renderer, calibrate_probes
+from native.app import Renderer
 from server import fractals
 
 W, H = 320, 200
@@ -33,7 +33,6 @@ def main() -> int:
     gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
 
     fractals.warmup()
-    calibrate_probes()
     r = Renderer(W, H)
     r.render_and_present(fractals._get_kernel(bool(view["precision"])), view)
     cp.cuda.get_current_stream().synchronize()

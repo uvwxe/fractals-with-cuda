@@ -3,7 +3,7 @@ import numpy as np
 import glfw
 from OpenGL import GL as gl
 sys.path.insert(0, '.')
-from native.app import AppState, Renderer, calibrate_probes, CAP
+from native.app import AppState, Renderer, CAP
 from server import fractals
 from PIL import Image
 
@@ -16,7 +16,6 @@ win = glfw.create_window(W, H, 'shot', None, None)
 glfw.make_context_current(win)
 gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
 fractals.warmup()
-calibrate_probes()
 r = Renderer(W, H)
 
 # hero shot: Seahorse Valley with palette 0

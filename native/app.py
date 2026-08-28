@@ -56,13 +56,6 @@ _PROBE_PX = 256 * 256
 _PROBE_ITERS = 256
 
 
-def calibrate_probes() -> None:
-    """No-op: probes are constants (see module docstring). Kept for API
-    compatibility with callers; NEVER measure kernel time with CUDA events on
-    this machine — a single host sync costs ~20ms and inflates the result."""
-    pass
-
-
 def predict_ms(precision: int, pixels: int, iters: int) -> float:
     probe = _PROBE["fp32" if precision == 0 else "fp64"]
     return probe * (max(pixels, 1) / _PROBE_PX) * (max(iters, 1) / _PROBE_ITERS)
@@ -111,10 +104,6 @@ def run_probe() -> None:
         # RTX 3050 Laptop. Iteration ceiling 6000, motion width 768.
         CAP["iter_ceiling_fp64"] = 6000
         CAP["motion_wide"] = 768
-
-
-def scale_from_probe() -> dict:
-    return dict(CAP)
 
 
 class AppState:
@@ -309,7 +298,6 @@ def main() -> int:
     # CUDA after the GL context exists. Warmup JIT-compiles both kernels.
     fractals.warmup()
     run_probe()
-    calibrate_probes()
     props = cp.cuda.runtime.getDeviceProperties(0)
     print(f"CUDA: {props['name'].decode()}", flush=True)
 
