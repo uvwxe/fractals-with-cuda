@@ -65,7 +65,6 @@ def predict_ms(precision: int, pixels: int, iters: int, width: int = 0) -> float
     # fp64 4000it@720p total 55.7ms - 21ms floor => 9.2e-9 ms/px/iter.
     # The old pure-linear model ignored the floor and over-estimated
     # deep fp64 by ~3x, which made adaptive-res crater to 25%.
-    import math as _m
     floor = (13.0 + width * 0.0068) if width else 0.0
     kpi = 2.08e-9 if precision == 0 else 9.2e-9
     return floor + kpi * (max(pixels, 1)) * (max(iters, 1))
@@ -344,7 +343,9 @@ def main() -> int:
                     "centerRe": state.centerRe, "centerIm": state.centerIm,
                     "scale": state.scale, "mode": state.mode,
                     "palette": state.palette, "maxIter": state.max_iter,
-                    "bookmarks": [b for b in bookmarks if b],
+                    # [slot, view] pairs: a bare list would compact empty slots
+                    # and renumber every bookmark on restore.
+                    "bookmarks": [[i, b] for i, b in enumerate(bookmarks) if b],
                 }, f)
         except Exception as e:
             print(f"state save failed: {e}", flush=True)
@@ -361,9 +362,14 @@ def main() -> int:
                 state.mode = int(d.get("mode", state.mode))
                 state.palette = int(d.get("palette", state.palette))
                 state.max_iter = int(d.get("maxIter", state.max_iter))
-                for i, b in enumerate(d.get("bookmarks", [])[:10]):
-                    if b:
-                        bookmarks[i] = b
+                saved = d.get("bookmarks", [])
+                if isinstance(saved, dict):
+                    items = list(saved.items())
+                else:
+                    items = [(i, b) for i, b in enumerate(saved[:10])]  # legacy
+                for i, b in items:
+                    if b and 0 <= int(i) < 10:
+                        bookmarks[int(i)] = b
                 print(f"restored state: ×{format_mag(FULL_SET['scale']/state.scale)}", flush=True)
         except Exception as e:
             print(f"state restore failed: {e}", flush=True)
@@ -384,15 +390,18 @@ def main() -> int:
         return min_re + px * step, min_im + (h - py) * step
 
     def on_scroll(_win, _dx, dy):
+        nonlocal anim
+        anim = None  # user input takes over from preset/bookmark fly-ins
         scroll_queue.append(dy)
         mark_input()
 
     def on_button(_win, button, action, _mods):
-        nonlocal dragging, drag_prev
+        nonlocal dragging, drag_prev, anim
         mark_input()
         w, h = framebuffer()
         if button == glfw.MOUSE_BUTTON_LEFT:
             if action == glfw.PRESS:
+                anim = None  # drag cancels any fly-in, like the web version
                 dragging = True
                 drag_prev = cursor_pos()
             elif action == glfw.RELEASE:
@@ -428,6 +437,38 @@ def main() -> int:
         if action != glfw.PRESS:
             return
         mark_input()
+        if pending_bookmark:
+            # Bookmark digits must be handled FIRST: keys 0-9 are shared with
+            # presets (0, 5-9) and palettes (1-4), and those branches run
+            # earlier in the chain — the bookmark slot check at the bottom was
+            # unreachable, making B/G+0-9 dead code.
+            if glfw.KEY_0 <= key <= glfw.KEY_9:
+                slot = key - glfw.KEY_0
+                if pending_bookmark == "save":
+                    bookmarks[slot] = {
+                        "centerRe": state.centerRe, "centerIm": state.centerIm,
+                        "scale": state.scale, "mode": state.mode,
+                        "palette": state.palette, "maxIter": state.max_iter,
+                    }
+                    print(f"bookmark {slot} saved: ×{format_mag(FULL_SET['scale']/state.scale)}", flush=True)
+                else:
+                    b = bookmarks[slot]
+                    if b:
+                        state.precision_pin = None
+                        state.iter_pin = None
+                        state.mode = b["mode"]
+                        state.palette = b["palette"]
+                        anim = {"t0": time.perf_counter(), "dur": 1.1,
+                                "from": {"centerRe": state.centerRe, "centerIm": state.centerIm,
+                                         "scale": state.scale},
+                                "to": {"centerRe": b["centerRe"], "centerIm": b["centerIm"],
+                                       "scale": b["scale"]}}
+                        print(f"fly to bookmark {slot}", flush=True)
+                    else:
+                        print(f"bookmark {slot} empty", flush=True)
+                pending_bookmark = None
+                return
+            pending_bookmark = None  # any other key cancels the pending B/G
         if key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(window, True)
         elif key == glfw.KEY_P:
@@ -489,31 +530,6 @@ def main() -> int:
             pending_bookmark = "save"
         elif key == glfw.KEY_G:
             pending_bookmark = "go"
-        elif pending_bookmark and glfw.KEY_0 <= key <= glfw.KEY_9:
-            slot = key - glfw.KEY_0
-            if pending_bookmark == "save":
-                bookmarks[slot] = {
-                    "centerRe": state.centerRe, "centerIm": state.centerIm,
-                    "scale": state.scale, "mode": state.mode,
-                    "palette": state.palette, "maxIter": state.max_iter,
-                }
-                print(f"bookmark {slot} saved: ×{format_mag(FULL_SET['scale']/state.scale)}", flush=True)
-            else:
-                b = bookmarks[slot] if slot < len(bookmarks) else None
-                if b:
-                    state.precision_pin = None
-                    state.iter_pin = None
-                    state.mode = b["mode"]
-                    state.palette = b["palette"]
-                    anim = {"t0": time.perf_counter(), "dur": 1.1,
-                            "from": {"centerRe": state.centerRe, "centerIm": state.centerIm,
-                                     "scale": state.scale},
-                            "to": {"centerRe": b["centerRe"], "centerIm": b["centerIm"],
-                                   "scale": b["scale"]}}
-                    print(f"fly to bookmark {slot}", flush=True)
-                else:
-                    print(f"bookmark {slot} empty", flush=True)
-            pending_bookmark = None
 
     glfw.set_scroll_callback(window, on_scroll)
     glfw.set_mouse_button_callback(window, on_button)
