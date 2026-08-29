@@ -18,6 +18,20 @@ _KERNEL_SRC = r"""
 #define RLOG2 log2f
 #endif
 
+__device__ inline bool mandelbrot_interior(REAL cr, REAL ci)
+{
+    // Main cardioid + period-2 bulb: mathematically guaranteed interior.
+    // Skipping the iteration loop for these pixels is exact (they can only
+    // ever be classified as interior) and saves the full max_iter burn,
+    // which dominates the default view where the interior covers much of
+    // the screen. Exterior pixels are never affected.
+    REAL xm = cr - (REAL)0.25;
+    REAL q = xm * xm + ci * ci;
+    if (q * (q + xm) <= (REAL)0.25 * ci * ci) return true;   // cardioid
+    REAL xp = cr + (REAL)1.0;
+    return (xp * xp + ci * ci) <= (REAL)0.0625;              // period-2 bulb
+}
+
 __device__ inline REAL escape_time(
     REAL zr0, REAL zi0, REAL cr, REAL ci, int max_iter)
 {
@@ -107,8 +121,10 @@ void fractal_kernel(
                 REAL t;
                 unsigned char r, g, b;
                 if (mode == 0) {
-                    t = escape_time(0.0, 0.0,
-                        r_min_re + px * r_step_re, r_min_im + py * r_step_im, max_iter);
+                    REAL cr = r_min_re + px * r_step_re;
+                    REAL ci = r_min_im + py * r_step_im;
+                    t = mandelbrot_interior(cr, ci) ? (REAL)-1.0
+                        : escape_time(0.0, 0.0, cr, ci, max_iter);
                 } else {
                     t = escape_time(
                         r_min_re + px * r_step_re, r_min_im + py * r_step_im,
@@ -135,8 +151,10 @@ void fractal_kernel(
 
     REAL t;
     if (mode == 0) {
-        t = escape_time(0.0, 0.0,
-            r_min_re + (REAL)x * r_step_re, r_min_im + (REAL)y * r_step_im, max_iter);
+        REAL cr = r_min_re + (REAL)x * r_step_re;
+        REAL ci = r_min_im + (REAL)y * r_step_im;
+        t = mandelbrot_interior(cr, ci) ? (REAL)-1.0
+            : escape_time(0.0, 0.0, cr, ci, max_iter);
     } else {
         t = escape_time(
             r_min_re + (REAL)x * r_step_re, r_min_im + (REAL)y * r_step_im,
