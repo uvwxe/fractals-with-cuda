@@ -27,10 +27,6 @@ from server import fractals
 W, H = 1280, 720
 
 
-import os
-DRY_INTERVAL = float(os.environ.get("DRY_INTERVAL", "1.0"))
-
-
 class Sim:
     def __init__(self):
         self.state = AppState()
@@ -113,33 +109,21 @@ def main():
           f"fp64 {predict_ms(1, W*H, 400):.2f} ms", flush=True)
 
     dirty = False
-    last_px = W * H
     last_title = time.perf_counter()
     last_t = time.perf_counter()
-    last_dog_purge = time.perf_counter()
     timeline = []
     hitches = []
     dirty_count = 0
     drag_x = 0.0
-    sim_last_input = time.perf_counter()
-    refine_stage = 0
-    REFINE_STAGES = 3
     self_motion_wide = 768
     last_motion = time.perf_counter()
 
     def decide_res():
         # Mirrors the app: no dynamic resolution (motion_wide fixed), FULL
         # iterations always. Just records the predicted cost for the report.
-        nonlocal last_px
         mw = min(W, self_motion_wide)
         mh = max(2, round(H * (mw / W)))
         return predict_ms(sim.state.precision, mw * mh, sim.state.max_iter, mw)
-
-    def queued_guard():
-        # count of renders since last adapt happened implicitly through pacing
-        pass
-
-    sim_moving = False
 
     phases = [
         ("idle", 1.0),
@@ -205,8 +189,6 @@ def main():
             # main-loop math
             w, h = W, H
             dirty = sim.step(dt, dirty)
-            if sim.scroll_queue or sim.zoom_vel > 1e-3 or sim.dragging:
-                sim_last_input = time.perf_counter()
 
             if dirty:
                 dirty = False
@@ -215,14 +197,12 @@ def main():
                 mh = max(2, round(H * (mw / W)))
                 v = sim.state.view(mw, mh)
                 renderer.render_and_present(fractals._get_kernel(bool(sim.state.precision)), v)
-                last_px = mw * mh
                 dirty_count += 1
                 last_motion = time.perf_counter()
             elif time.perf_counter() - last_motion > 0.4 and (renderer.w != W or renderer.h != H):
                 # settle sharpen: one full-res frame
                 v = sim.state.view(W, H)
                 renderer.render_and_present(fractals._get_kernel(bool(sim.state.precision)), v)
-                last_px = W * H
                 dirty_count += 1
                 last_motion = time.perf_counter()
             else:
@@ -238,7 +218,6 @@ def main():
             now_t = time.perf_counter()
             if now_t - last_title > 0.25:
                 last_title = now_t
-                sim_moving = sim.zoom_vel > 1e-3 or sim.dragging
                 pred_ms = decide_res()
                 mag = FULL_SET["scale"] / sim.state.scale
                 timeline.append({

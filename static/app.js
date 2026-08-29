@@ -223,7 +223,10 @@ function autoIter() {
   const ceiling = state.precision === 1 ? 4000 : 12000;
   const needed = Math.round(400 * (1 + Math.sqrt(Math.min(mag, 20000)) * 0.9));
   if (!userPinnedIter) {
-    m = Math.min(ceiling, Math.max(state.maxIter, needed));
+    // Recompute fresh each time (mirrors the native app): a Math.max ratchet
+    // against state.maxIter never relaxes, so zooming back out would keep
+    // deep-zoom iteration counts forever.
+    m = Math.min(ceiling, needed);
   }
   return m;
 }
@@ -299,6 +302,7 @@ function setPrecisionManual(v) {
 }
 
 function setIter(n) {
+  userPinnedIter = true;   // [ ] keys must pin, or refreshAdaptive undoes them
   state.maxIter = n;
   updateIterUI();
   scheduleRender();
@@ -388,7 +392,7 @@ function panBy(dx, dy) {
   state.centerIm += dy * p;
 }
 
-function zoomAround(factor, cx, cy, fx, fy) {
+function zoomAround(factor, fx, fy) {
   cancelAnim();
   const c = complexAt(fx, fy);
   const old = state.scale;
@@ -435,7 +439,7 @@ canvas.addEventListener('pointermove', e => {
     const r = canvas.getBoundingClientRect();
     const mx = (pts[0].x + pts[1].x) / 2 - r.left;
     const my = (pts[0].y + pts[1].y) / 2 - r.top;
-    zoomAround(factor, mx / r.width, my / r.height, mx, my);
+    zoomAround(factor, mx, my);
     updateHud();
     scheduleRender();
   } else if (clickCandidate && !dragging) {
@@ -492,7 +496,7 @@ function handleClick(cx, cy) {
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
   const pt = localPoint(e);
-  zoomAround(Math.exp(-e.deltaY * 0.0015), pt.x / pt.w, pt.y / pt.h, pt.x, pt.y);
+  zoomAround(Math.exp(-e.deltaY * 0.0015), pt.x, pt.y);
   updateHud();
   scheduleRender();
 }, { passive: false });
